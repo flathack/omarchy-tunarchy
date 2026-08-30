@@ -63,6 +63,7 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property var activeTrack: player && player.track ? player.track : null
+  readonly property string activeThumb: activeTrack ? String(activeTrack.thumb || "") : ""
   readonly property bool configured: player && player.configured === true
   readonly property string barText: Model.barLabel(player)
   readonly property bool demoMode: setting("demoMode", false) === true
@@ -457,8 +458,11 @@ Panel {
     bar: root.bar
     labelVisible: false
     hasVisualContent: true
-    fixedWidth: root.activeTrack ? Style.space(180) : -1
-    tooltipText: root.activeTrack ? Model.subtitle(root.activeTrack) : "OmaPlex Music"
+    fixedWidth: vertical ? -1 : (root.activeTrack ? Style.space(180) : Style.bar.iconSlot)
+    fixedHeight: vertical ? Style.bar.iconSlot : -1
+    tooltipText: root.activeTrack
+      ? root.activeTrack.title + (Model.subtitle(root.activeTrack) ? " · " + Model.subtitle(root.activeTrack) : "")
+      : "OmaPlex Music"
     active: root.player && root.player.playing === true
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton) root.manualSetup()
@@ -470,23 +474,44 @@ Panel {
     }
 
     Row {
-      anchors.fill: parent
-      anchors.leftMargin: Style.space(8)
-      anchors.rightMargin: Style.space(8)
+      id: barContent
+      anchors.centerIn: parent
+      width: button.vertical ? coverFrame.width : parent.width - Style.space(16)
+      height: coverFrame.height
       spacing: Style.space(7)
 
-      Image {
-        width: Style.space(18)
-        height: Style.space(18)
+      Rectangle {
+        id: coverFrame
+        width: Math.min(Style.space(20), button.barSize - Style.space(8))
+        height: width
         anchors.verticalCenter: parent.verticalCenter
-        source: root.logoUrl
-        fillMode: Image.PreserveAspectFit
+        radius: Math.max(2, Style.cornerRadius / 2)
+        color: Style.selectedFillFor(button.foreground, Color.accent)
+        clip: true
         opacity: root.player && root.player.playing ? 1 : 0.78
+
+        Image {
+          id: barCover
+          anchors.fill: parent
+          source: root.activeThumb
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          cache: true
+          visible: root.activeThumb !== "" && status === Image.Ready
+        }
+
+        Image {
+          anchors.fill: parent
+          anchors.margins: Style.space(2)
+          source: root.logoUrl
+          fillMode: Image.PreserveAspectFit
+          visible: !barCover.visible
+        }
       }
 
       Text {
-        visible: root.activeTrack !== null
-        width: Math.max(0, parent.width - Style.space(34))
+        visible: root.activeTrack !== null && !button.vertical
+        width: Math.max(0, parent.width - coverFrame.width - parent.spacing)
         anchors.verticalCenter: parent.verticalCenter
         text: root.activeTrack ? root.activeTrack.title : ""
         color: button.foreground

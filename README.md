@@ -13,7 +13,8 @@ player. OmaPlex Music is not affiliated with or endorsed by Plex, Inc.
 - Artist → album → track and playlist → track navigation
 - Album/playlist play and shuffle actions
 - Manageable queue with play, reorder, remove, and clear-upcoming actions
-- Cover art, progress, seek, 0–130% volume, play/pause, previous, and next
+- Album cover in the bar and player, progress, seek, 0–130% volume, play/pause,
+  previous, and next
 - Shuffle, repeat-all, and repeat-one
 - MPRIS integration for hardware media keys and desktop media controls
 - Actionable offline, authentication, DNS, library, and server error states

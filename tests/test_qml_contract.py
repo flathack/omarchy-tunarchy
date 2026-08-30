@@ -25,6 +25,13 @@ class QmlContractTests(unittest.TestCase):
                        'control("volume"', 'control("shuffle")', 'control("repeat")'):
             self.assertIn(action, QML)
 
+    def test_bar_shows_active_album_cover_with_logo_fallback(self):
+        self.assertIn("readonly property string activeThumb", QML)
+        self.assertIn("id: barCover", QML)
+        self.assertIn("source: root.activeThumb", QML)
+        self.assertIn("visible: !barCover.visible", QML)
+        self.assertIn("fixedHeight: vertical ? Style.bar.iconSlot", QML)
+
     def test_library_and_queue_navigation_are_present(self):
         for view in ('"artists"', '"albums"', '"playlists"', '"history"', '"frequent"', '"favorites"', '"queue"'):
             self.assertIn(view, QML)
