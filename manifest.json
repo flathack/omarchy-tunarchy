@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "flathack.omaplex-music",
-  "name": "OmaPlex Music",
-  "version": "0.3.1",
+  "id": "io.github.flathack.tunarchy",
+  "name": "Tunarchy",
+  "version": "0.4.0",
   "author": "flathack",
   "license": "MIT",
   "description": "Browse and play a Plex music library from the Omarchy bar.",
@@ -13,7 +13,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "OmaPlex Music",
+    "displayName": "Tunarchy",
     "description": "Plex music browser and player controls",
     "category": "Media",
     "allowMultiple": false,

@@ -12,7 +12,7 @@ from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-HELPER = ROOT / "bin" / "omarchy-omaplex-music"
+HELPER = ROOT / "bin" / "tunarchy"
 
 
 def load_player():
@@ -403,18 +403,17 @@ class PlayerTests(unittest.TestCase):
 class RepositoryContractTests(unittest.TestCase):
     def test_manifest_and_entry_point(self):
         manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["id"], "flathack.omaplex-music")
+        self.assertEqual(manifest["id"], "io.github.flathack.tunarchy")
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.3.1")
-        self.assertTrue((ROOT / "assets" / "omaplex.svg").is_file())
+        self.assertEqual(manifest["version"], "0.4.0")
+        self.assertTrue((ROOT / "assets" / "tunarchy.svg").is_file())
         self.assertTrue((ROOT / "preview.png").is_file())
 
     def test_mpris_client_name_is_a_valid_bus_component(self):
-        helper = (ROOT / "bin" / "omarchy-omaplex-music").read_text(encoding="utf-8")
-        self.assertIn('"--audio-client-name=OmaPlex-Music"', helper)
-        self.assertNotIn('"--audio-client-name=OmaPlex Music"', helper)
+        helper = (ROOT / "bin" / "tunarchy").read_text(encoding="utf-8")
+        self.assertIn('"--audio-client-name=Tunarchy"', helper)
 
     def test_no_credentials_are_tracked(self):
         forbidden = b"X-Plex" + b"-Token=" + b"real"

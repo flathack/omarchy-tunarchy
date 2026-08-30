@@ -1,10 +1,10 @@
-# OmaPlex Music
+# Tunarchy
 
 An unofficial native Omarchy bar widget for browsing and playing music from a
 Plex Media Server. Click the bar item to open a compact library browser and
-player. OmaPlex Music is not affiliated with or endorsed by Plex, Inc.
+player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 
-![OmaPlex Music player preview](preview.png)
+![Tunarchy player preview](preview.png)
 
 ## Features
 
@@ -38,18 +38,18 @@ player. OmaPlex Music is not affiliated with or endorsed by Plex, Inc.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/flathack/omarchy-omaplex-music.git --enable
+omarchy plugin add https://github.com/flathack/omarchy-tunarchy.git --enable
 ```
 
 The manifest suggests the center of the bar. Move it at any time with:
 
 ```bash
-omarchy bar move flathack.omaplex-music --section center
+omarchy bar move io.github.flathack.tunarchy --section center
 ```
 
 ## Connect Plex
 
-When the player is not connected, click **Connect with Plex**. OmaPlex asks for
+When the player is not connected, click **Connect with Plex**. Tunarchy asks for
 the server URL, opens Plex's sign-in page in the browser, and waits for you to
 approve the app. Your Plex password is entered only on Plex's website and is
 never visible to the plugin.
@@ -57,7 +57,7 @@ never visible to the plugin.
 The same flow is available from a terminal:
 
 ```bash
-~/.config/omarchy/plugins/flathack.omaplex-music/bin/omarchy-omaplex-music login
+~/.config/omarchy/plugins/io.github.flathack.tunarchy/bin/tunarchy login
 ```
 
 Enter the base URL, for example `http://192.168.1.20:32400`. If the server has
@@ -70,7 +70,7 @@ fallback. Plex documents that fallback in
 Connection details are stored in:
 
 ```text
-${XDG_CONFIG_HOME:-~/.config}/omarchy-omaplex-music/config.json
+${XDG_CONFIG_HOME:-~/.config}/tunarchy/config.json
 ```
 
 ## Usage
@@ -101,7 +101,7 @@ ${XDG_CONFIG_HOME:-~/.config}/omarchy-omaplex-music/config.json
 The CLI is also useful for troubleshooting:
 
 ```bash
-PLAYER="$HOME/.config/omarchy/plugins/flathack.omaplex-music/bin/omarchy-omaplex-music"
+PLAYER="$HOME/.config/omarchy/plugins/io.github.flathack.tunarchy/bin/tunarchy"
 "$PLAYER" doctor
 "$PLAYER" status
 "$PLAYER" health
@@ -114,8 +114,8 @@ PLAYER="$HOME/.config/omarchy/plugins/flathack.omaplex-music/bin/omarchy-omaplex
 Plugin settings are exposed through Omarchy's schema:
 
 ```bash
-omarchy bar set flathack.omaplex-music recentAlbumCount 30
-omarchy bar set flathack.omaplex-music libraryItemCount 150
+omarchy bar set io.github.flathack.tunarchy recentAlbumCount 30
+omarchy bar set io.github.flathack.tunarchy libraryItemCount 150
 ```
 
 ### Demo mode
@@ -123,24 +123,24 @@ omarchy bar set flathack.omaplex-music libraryItemCount 150
 Demo mode shows fictional data, never contacts Plex, and never starts mpv:
 
 ```bash
-omarchy bar set flathack.omaplex-music demoMode true --json
+omarchy bar set io.github.flathack.tunarchy demoMode true --json
 # Restore the real library afterwards:
-omarchy bar set flathack.omaplex-music demoMode false --json
+omarchy bar set io.github.flathack.tunarchy demoMode false --json
 ```
 
 ## Updates and removal
 
 ```bash
-omarchy plugin update flathack.omaplex-music
-omarchy plugin remove flathack.omaplex-music
+omarchy plugin update io.github.flathack.tunarchy
+omarchy plugin remove io.github.flathack.tunarchy
 ```
 
 Removing the plugin intentionally leaves connection settings and artwork cache
 in place. To remove them too, move these folders to the desktop trash:
 
 ```bash
-gio trash "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-omaplex-music"
-gio trash "${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-omaplex-music"
+gio trash "${XDG_CONFIG_HOME:-$HOME/.config}/tunarchy"
+gio trash "${XDG_CACHE_HOME:-$HOME/.cache}/tunarchy"
 ```
 
 ## Development
@@ -155,8 +155,8 @@ omarchy plugin validate .
 For local development, symlink the checkout and enable it:
 
 ```bash
-ln -s "$PWD" "$HOME/.config/omarchy/plugins/flathack.omaplex-music"
-omarchy plugin enable flathack.omaplex-music --section center
+ln -s "$PWD" "$HOME/.config/omarchy/plugins/io.github.flathack.tunarchy"
+omarchy plugin enable io.github.flathack.tunarchy --section center
 ```
 
 Files below the plugin folder hot-reload in the Omarchy shell.

@@ -9,8 +9,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "flathack.omaplex-music"
-  ipcTarget: "flathack.omaplex-music"
+  moduleName: "io.github.flathack.tunarchy"
+  ipcTarget: "io.github.flathack.tunarchy"
 
   property var player: ({ configured: false, playing: false, track: null, position: 0, duration: 0, volume: 100, shuffle: false, repeat: "off" })
   property var items: []
@@ -56,8 +56,8 @@ Panel {
     { keys: "F1", action: "Toggle this help" }
   ]
 
-  readonly property url helperUrl: Qt.resolvedUrl("bin/omarchy-omaplex-music")
-  readonly property url logoUrl: Qt.resolvedUrl("assets/omaplex.svg")
+  readonly property url helperUrl: Qt.resolvedUrl("bin/tunarchy")
+  readonly property url logoUrl: Qt.resolvedUrl("assets/tunarchy.svg")
   readonly property string helperPath: decodeURIComponent(String(helperUrl).replace(/^file:\/\//, ""))
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -462,7 +462,7 @@ Panel {
     fixedHeight: vertical ? Style.bar.iconSlot : -1
     tooltipText: root.activeTrack
       ? root.activeTrack.title + (Model.subtitle(root.activeTrack) ? " · " + Model.subtitle(root.activeTrack) : "")
-      : "OmaPlex Music"
+      : "Tunarchy"
     active: root.player && root.player.playing === true
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton) root.manualSetup()
@@ -581,7 +581,7 @@ Panel {
 
           Text {
             Layout.fillWidth: true
-            text: root.helpVisible ? "Keyboard map" : (root.activeTrack ? root.activeTrack.title : "OmaPlex Music")
+            text: root.helpVisible ? "Keyboard map" : (root.activeTrack ? root.activeTrack.title : "Tunarchy")
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading

@@ -9,7 +9,7 @@ QML = (ROOT / "Panel.qml").read_text(encoding="utf-8")
 class QmlContractTests(unittest.TestCase):
     def test_native_panel_contract(self):
         self.assertIn("Panel {", QML)
-        self.assertIn('moduleName: "flathack.omaplex-music"', QML)
+        self.assertIn('moduleName: "io.github.flathack.tunarchy"', QML)
         self.assertIn("KeyboardPanel {", QML)
         self.assertIn("WidgetButton {", QML)
 
