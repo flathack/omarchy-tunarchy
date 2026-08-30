@@ -34,4 +34,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y qt6-declarative-dev-tools
       - name: Parse and format-check QML
-        run: qmlformat Panel.qml >/dev/null
+        run: /usr/lib/qt6/bin/qmlformat Panel.qml >/dev/null
