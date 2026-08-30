@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""Small dependency-free Plex music client and mpv controller."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import pathlib
+import socket
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+APP = "omarchy-omaplex-music"
+CONFIG_DIR = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")) / APP
+CONFIG_FILE = CONFIG_DIR / "config.json"
+CACHE_DIR = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / APP
+STATE_FILE = CACHE_DIR / "state.json"
+SOCKET_FILE = CACHE_DIR / "mpv.sock"
+
+
+class PlayerError(RuntimeError):
+    pass
+
+
+def ensure_private_dir(path: pathlib.Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+def atomic_json(path: pathlib.Path, value: Any, mode: int = 0o600) -> None:
+    ensure_private_dir(path.parent)
+    temporary = path.with_name(path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    descriptor = os.open(temporary, flags, mode)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def load_json(path: pathlib.Path, fallback: Any) -> Any:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            return json.load(stream)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return fallback
+
+
+def load_config(required: bool = True) -> dict[str, Any]:
+    data = load_json(CONFIG_FILE, {})
+    if not isinstance(data, dict) or not data.get("server") or not data.get("token"):
+        if required:
+            raise PlayerError("OmaPlex Music is not configured. Run: omarchy-omaplex-music configure")
+        return {}
+    data["server"] = str(data["server"]).rstrip("/")
+    return data
+
+
+def plex_request(config: dict[str, Any], path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    query = dict(params or {})
+    query["X-Plex-Token"] = config["token"]
+    url = config["server"] + path + "?" + urllib.parse.urlencode(query)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "X-Plex-Client-Identifier": "omarchy-omaplex-music",
+            "X-Plex-Product": "OmaPlex Music",
+            "X-Plex-Version": "0.1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise PlayerError("Plex rejected the access token.") from error
+        raise PlayerError(f"Plex returned HTTP {error.code}.") from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise PlayerError(f"Could not reach Plex: {error}") from error
+
+
+def metadata(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    container = payload.get("MediaContainer", {})
+    rows = container.get("Metadata", []) if isinstance(container, dict) else []
+    return rows if isinstance(rows, list) else []
+
+
+def sections(config: dict[str, Any]) -> list[dict[str, str]]:
+    rows = plex_request(config, "/library/sections").get("MediaContainer", {}).get("Directory", [])
+    return [
+        {"key": str(row.get("key", "")), "title": str(row.get("title", "Music"))}
+        for row in rows
+        if row.get("type") == "artist" and row.get("key") is not None
+    ]
+
+
+def music_section(config: dict[str, Any]) -> str:
+    configured = str(config.get("section", ""))
+    available = sections(config)
+    if configured and any(row["key"] == configured for row in available):
+        return configured
+    if not available:
+        raise PlayerError("No Plex music library was found.")
+    return available[0]["key"]
+
+
+def art_path(config: dict[str, Any], source: str | None) -> str:
+    if not source:
+        return ""
+    ensure_private_dir(CACHE_DIR / "art")
+    digest = hashlib.sha256(source.encode()).hexdigest()[:24]
+    target = CACHE_DIR / "art" / f"{digest}.jpg"
+    if target.exists() and target.stat().st_size > 0:
+        return target.as_uri()
+    url = config["server"] + source
+    separator = "&" if "?" in url else "?"
+    request = urllib.request.Request(url + separator + urllib.parse.urlencode({"X-Plex-Token": config["token"]}))
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            data = response.read(4 * 1024 * 1024)
+        if data:
+            target.write_bytes(data)
+            target.chmod(0o600)
+            return target.as_uri()
+    except (OSError, urllib.error.URLError, TimeoutError):
+        pass
+    return ""
+
+
+def compact_item(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    kind = str(row.get("type", ""))
+    return {
+        "key": str(row.get("ratingKey", row.get("key", ""))),
+        "type": kind,
+        "title": str(row.get("title", "Untitled")),
+        "artist": str(row.get("grandparentTitle", row.get("parentTitle", row.get("title", ""))) if kind == "artist" else row.get("grandparentTitle", row.get("parentTitle", ""))),
+        "album": str(row.get("parentTitle", "") if kind == "track" else row.get("title", "")),
+        "year": int(row.get("year", 0) or 0),
+        "duration": float(row.get("duration", 0) or 0) / 1000,
+        "thumb": art_path(config, row.get("thumb") or row.get("parentThumb") or row.get("grandparentThumb")),
+    }
+
+
+def recent(config: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    section = music_section(config)
+    payload = plex_request(config, f"/library/sections/{section}/recentlyAdded", {
+        "type": 9,
+        "X-Plex-Container-Start": 0,
+        "X-Plex-Container-Size": max(5, min(limit, 50)),
+    })
+    return [compact_item(config, row) for row in metadata(payload) if row.get("type") == "album"]
+
+
+def album_tracks(config: dict[str, Any], album_key: str) -> list[dict[str, Any]]:
+    payload = plex_request(config, f"/library/metadata/{urllib.parse.quote(album_key)}/children")
+    return [compact_item(config, row) for row in metadata(payload) if row.get("type") == "track"]
+
+
+def search(config: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+    section = music_section(config)
+    payload = plex_request(config, "/hubs/search", {
+        "query": query,
+        "sectionId": section,
+        "limit": max(5, min(limit, 50)),
+        "includeCollections": 0,
+    })
+    hubs = payload.get("MediaContainer", {}).get("Hub", [])
+    result: list[dict[str, Any]] = []
+    for hub in hubs if isinstance(hubs, list) else []:
+        for row in hub.get("Metadata", []) if isinstance(hub, dict) else []:
+            if row.get("type") in ("album", "track"):
+                result.append(compact_item(config, row))
+                if len(result) >= limit:
+                    return result
+    return result
+
+
+def raw_track(config: dict[str, Any], key: str) -> tuple[dict[str, Any], str]:
+    rows = metadata(plex_request(config, f"/library/metadata/{urllib.parse.quote(key)}"))
+    if not rows:
+        raise PlayerError("The selected track no longer exists in Plex.")
+    row = rows[0]
+    media = row.get("Media", [])
+    parts = media[0].get("Part", []) if media and isinstance(media[0], dict) else []
+    part = str(parts[0].get("key", "")) if parts else ""
+    if not part:
+        raise PlayerError("Plex did not provide a playable file for this track.")
+    return compact_item(config, row), part
+
+
+def mpv_command(command: list[Any], expect_reply: bool = False) -> Any:
+    request = {"command": command}
+    if expect_reply:
+        request["request_id"] = int(time.time_ns() % 1_000_000_000)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(1.0)
+        client.connect(str(SOCKET_FILE))
+        client.sendall((json.dumps(request) + "\n").encode())
+        if not expect_reply:
+            return None
+        buffer = b""
+        while b"\n" not in buffer:
+            buffer += client.recv(65536)
+        response = json.loads(buffer.split(b"\n", 1)[0])
+        if response.get("error") != "success":
+            raise PlayerError(f"mpv: {response.get('error', 'unknown error')}")
+        return response.get("data")
+
+
+def mpv_running() -> bool:
+    if not SOCKET_FILE.exists():
+        return False
+    try:
+        mpv_command(["get_property", "idle-active"], True)
+        return True
+    except (OSError, PlayerError, json.JSONDecodeError):
+        try:
+            SOCKET_FILE.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def start_mpv() -> None:
+    if mpv_running():
+        return
+    if not shutil_which("mpv"):
+        raise PlayerError("mpv is required. Install it with: omarchy pkg add mpv")
+    ensure_private_dir(CACHE_DIR)
+    subprocess.Popen(
+        ["mpv", "--idle=yes", "--no-video", "--audio-display=no", "--keep-open=no",
+         f"--input-ipc-server={SOCKET_FILE}", "--terminal=no"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    for _ in range(30):
+        if mpv_running():
+            return
+        time.sleep(0.05)
+    raise PlayerError("mpv did not start.")
+
+
+def shutil_which(name: str) -> str | None:
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = pathlib.Path(folder) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def stream_url(config: dict[str, Any], part: str) -> str:
+    separator = "&" if "?" in part else "?"
+    return config["server"] + part + separator + urllib.parse.urlencode({"X-Plex-Token": config["token"]})
+
+
+def play(config: dict[str, Any], track_key: str, album_key: str | None) -> dict[str, Any]:
+    queue = album_tracks(config, album_key) if album_key else []
+    if not any(row["key"] == track_key for row in queue):
+        item, _ = raw_track(config, track_key)
+        queue = [item]
+    start_mpv()
+    full_queue: list[dict[str, Any]] = []
+    selected = 0
+    for index, item in enumerate(queue):
+        detailed, part = raw_track(config, item["key"])
+        full_queue.append(detailed)
+        if item["key"] == track_key:
+            selected = index
+        mpv_command(["loadfile", stream_url(config, part), "replace" if index == 0 else "append"])
+    mpv_command(["set_property", "playlist-pos", selected])
+    atomic_json(STATE_FILE, {"queue": full_queue, "updated": int(time.time())})
+    return status(config)
+
+
+def property_or(name: str, fallback: Any) -> Any:
+    try:
+        value = mpv_command(["get_property", name], True)
+        return fallback if value is None else value
+    except (OSError, PlayerError, json.JSONDecodeError):
+        return fallback
+
+
+def status(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = config or load_config(False)
+    configured = bool(config)
+    state = load_json(STATE_FILE, {"queue": []})
+    queue = state.get("queue", []) if isinstance(state, dict) else []
+    if not mpv_running():
+        return {"configured": configured, "playing": False, "paused": False, "track": queue[0] if queue else None,
+                "position": 0, "duration": (queue[0].get("duration", 0) if queue else 0), "volume": 100}
+    index = int(property_or("playlist-pos", 0) or 0)
+    track = queue[index] if isinstance(queue, list) and 0 <= index < len(queue) else None
+    paused = bool(property_or("pause", False))
+    return {
+        "configured": configured,
+        "playing": not paused and not bool(property_or("idle-active", False)),
+        "paused": paused,
+        "track": track,
+        "position": float(property_or("time-pos", 0) or 0),
+        "duration": float(property_or("duration", track.get("duration", 0) if track else 0) or 0),
+        "volume": float(property_or("volume", 100) or 0),
+    }
+
+
+def control(action: str, value: float | None = None) -> dict[str, Any]:
+    config = load_config(False)
+    if not mpv_running():
+        return status(config)
+    commands = {
+        "toggle": ["cycle", "pause"],
+        "next": ["playlist-next", "force"],
+        "previous": ["playlist-prev", "force"],
+        "stop": ["stop"],
+    }
+    if action in commands:
+        mpv_command(commands[action])
+    elif action == "seek" and value is not None:
+        mpv_command(["set_property", "time-pos", max(0, value)])
+    elif action == "volume" and value is not None:
+        mpv_command(["set_property", "volume", max(0, min(130, value))])
+    else:
+        raise PlayerError("Unknown player action.")
+    time.sleep(0.04)
+    return status(config)
+
+
+def configure(args: argparse.Namespace) -> None:
+    previous = load_config(False)
+    server = (args.server or input(f"Plex server URL [{previous.get('server', 'http://localhost:32400')}]: ").strip()
+              or previous.get("server", "http://localhost:32400"))
+    token = args.token or getpass.getpass("Plex access token: ") or previous.get("token", "")
+    candidate = {"server": server.rstrip("/"), "token": token}
+    available = sections(candidate)
+    if not available:
+        raise PlayerError("The server has no music library.")
+    if args.section:
+        chosen = next((row for row in available if row["key"] == args.section), None)
+        if chosen is None:
+            raise PlayerError("That music library does not exist.")
+    elif len(available) == 1:
+        chosen = available[0]
+    else:
+        print("Music libraries:")
+        for index, row in enumerate(available, 1):
+            print(f"  {index}. {row['title']}")
+        selection = input("Choose a library [1]: ").strip() or "1"
+        try:
+            chosen = available[int(selection) - 1]
+        except (ValueError, IndexError) as error:
+            raise PlayerError("Invalid library selection.") from error
+    candidate.update({"section": chosen["key"], "sectionTitle": chosen["title"]})
+    atomic_json(CONFIG_FILE, candidate)
+    print(f"Configured OmaPlex Music with library: {chosen['title']}")
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description="Plex music browser and mpv controller for Omarchy")
+    commands = root.add_subparsers(dest="command", required=True)
+    setup = commands.add_parser("configure", help="store Plex connection details")
+    setup.add_argument("--server")
+    setup.add_argument("--token")
+    setup.add_argument("--section")
+    recent_parser = commands.add_parser("recent", help="list recently added albums")
+    recent_parser.add_argument("--limit", type=int, default=20)
+    search_parser = commands.add_parser("search", help="search albums and tracks")
+    search_parser.add_argument("query")
+    search_parser.add_argument("--limit", type=int, default=30)
+    tracks_parser = commands.add_parser("tracks", help="list tracks in an album")
+    tracks_parser.add_argument("album")
+    play_parser = commands.add_parser("play", help="play a track")
+    play_parser.add_argument("track")
+    play_parser.add_argument("--album")
+    control_parser = commands.add_parser("control", help="control mpv")
+    control_parser.add_argument("action", choices=("toggle", "next", "previous", "stop", "seek", "volume"))
+    control_parser.add_argument("value", nargs="?", type=float)
+    commands.add_parser("status", help="print player status")
+    commands.add_parser("doctor", help="check runtime and configuration")
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        result: Any = None
+        if args.command == "configure":
+            configure(args)
+            return 0
+        if args.command == "status":
+            result = status()
+        elif args.command == "recent":
+            config = load_config()
+            result = {"items": recent(config, args.limit), "library": config.get("sectionTitle", "Music")}
+        elif args.command == "search":
+            config = load_config()
+            result = {"items": search(config, args.query, args.limit), "query": args.query}
+        elif args.command == "tracks":
+            result = {"items": album_tracks(load_config(), args.album), "album": args.album}
+        elif args.command == "play":
+            result = play(load_config(), args.track, args.album)
+        elif args.command == "control":
+            result = control(args.action, args.value)
+        elif args.command == "doctor":
+            config = load_config(False)
+            result = {
+                "configured": bool(config),
+                "configFile": str(CONFIG_FILE),
+                "configPrivate": CONFIG_FILE.exists() and stat.S_IMODE(CONFIG_FILE.stat().st_mode) == 0o600,
+                "mpv": shutil_which("mpv") or "",
+                "serverReachable": bool(sections(config)) if config else False,
+            }
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (PlayerError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

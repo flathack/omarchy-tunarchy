@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "flathack.omaplex-music",
+  "name": "OmaPlex Music",
+  "version": "0.1.0",
+  "author": "flathack",
+  "license": "MIT",
+  "description": "Browse and play a Plex music library from the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaPlex Music",
+    "description": "Plex music browser and player controls",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "recentAlbumCount": 20
+    },
+    "schema": [
+      {
+        "key": "recentAlbumCount",
+        "type": "integer",
+        "label": "Recent albums",
+        "min": 5,
+        "max": 50,
+        "step": 5,
+        "defaultValue": 20,
+        "description": "Number of recently added albums shown in the panel."
+      }
+    ]
+  }
+}
