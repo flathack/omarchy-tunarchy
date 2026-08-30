@@ -27,6 +27,7 @@ Panel {
   property string pendingDataMode: "recent"
   property bool volumeDragging: false
   property bool suppressSearch: false
+  property int pendingSelectedIndex: -1
 
   readonly property var navigation: [
     { id: "recent", label: "Home", icon: "\uf015" },
@@ -129,10 +130,14 @@ Panel {
     currentParentKind = ""
     currentParentTitle = ""
     backStack = []
-    if (nextView === "queue") runData("queue", command(["queue"]))
+    if (nextView === "queue") {
+      runData("queue", command(["queue"]))
+      Qt.callLater(itemList.forceActiveFocus)
+    }
     else {
       var limit = nextView === "recent" ? setting("recentAlbumCount", 20) : setting("libraryItemCount", 100)
       runData(nextView, command(["library", nextView, "--limit", String(limit)]))
+      Qt.callLater(searchField.forceActiveFocus)
     }
   }
 
@@ -147,7 +152,11 @@ Panel {
   }
 
   function openContainer(item) {
-    backStack = [{ view: view, title: currentParentTitle }]
+    backStack = [{ view: view, title: currentParentTitle, query: query }]
+    suppressSearch = true
+    query = ""
+    searchDebounce.stop()
+    Qt.callLater(function() { root.suppressSearch = false })
     currentParentKey = String(item.key || "")
     currentParentKind = String(item.type || "album")
     currentParentTitle = String(item.title || "Collection")
@@ -156,9 +165,22 @@ Panel {
   }
 
   function goBack() {
-    if (query.trim() !== "") { searchNow(); return }
     var previous = backStack.length > 0 ? backStack[backStack.length - 1] : { view: "recent" }
-    loadView(previous.view || "recent")
+    if (previous.view === "search" && String(previous.query || "").trim() !== "") {
+      query = String(previous.query)
+      searchNow()
+    } else loadView(previous.view || "recent")
+  }
+
+  function handleEscape() {
+    if (query.trim() !== "") {
+      suppressSearch = true
+      query = ""
+      searchDebounce.stop()
+      Qt.callLater(function() { root.suppressSearch = false })
+      loadView("recent")
+    } else if (view === "children") goBack()
+    else close()
   }
 
   function handleData(raw) {
@@ -167,7 +189,9 @@ Panel {
     if (!parsed) { errorText = "Plex returned unreadable data."; return }
     items = Model.safeArray(parsed.items)
     if (parsed.stale === true) errorText = parsed.warning || "Showing cached library data while Plex is offline."
-    selectedIndex = 0
+    selectedIndex = pendingSelectedIndex >= 0
+      ? Math.max(0, Math.min(items.length - 1, pendingSelectedIndex)) : 0
+    pendingSelectedIndex = -1
   }
 
   function activateItem(item) {
@@ -237,6 +261,51 @@ Panel {
     Qt.callLater(function() { itemList.positionViewAtIndex(selectedIndex, ListView.Contain) })
   }
 
+  function moveQueueSelection(delta) {
+    if (view !== "queue" || items.length === 0) return
+    var destination = Math.max(0, Math.min(items.length - 1, selectedIndex + delta))
+    if (destination === selectedIndex) return
+    pendingSelectedIndex = destination
+    runQueueAction("move", Number(items[selectedIndex].queueIndex), destination)
+  }
+
+  function removeSelectedQueueItem() {
+    if (view !== "queue" || items.length === 0) return
+    pendingSelectedIndex = Math.max(0, Math.min(items.length - 2, selectedIndex))
+    runQueueAction("remove", Number(items[selectedIndex].queueIndex))
+  }
+
+  function activateSelection(modifiers) {
+    if (items.length === 0) return
+    var item = items[selectedIndex]
+    if ((modifiers & Qt.ShiftModifier) && item.type === "track" && view !== "queue") {
+      playNext(item); return
+    }
+    if ((modifiers & Qt.ShiftModifier) && (item.type === "album" || item.type === "playlist")) {
+      playItemCollection(item, true); return
+    }
+    if ((modifiers & Qt.ControlModifier) && (item.type === "album" || item.type === "playlist")) {
+      playItemCollection(item, false); return
+    }
+    activateItem(item)
+  }
+
+  function handleListKey(event) {
+    if (event.key === Qt.Key_Down) {
+      if ((event.modifiers & Qt.ControlModifier) && view === "queue") moveQueueSelection(1)
+      else moveSelection(1)
+      event.accepted = true
+    } else if (event.key === Qt.Key_Up) {
+      if ((event.modifiers & Qt.ControlModifier) && view === "queue") moveQueueSelection(-1)
+      else moveSelection(-1)
+      event.accepted = true
+    } else if (event.key === Qt.Key_Delete && view === "queue") {
+      removeSelectedQueueItem(); event.accepted = true
+    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+      activateSelection(event.modifiers); event.accepted = true
+    }
+  }
+
   function switchNavigation(delta) {
     if ((!configured && !demoMode) || navigation.length === 0) return
     var activeView = view
@@ -254,6 +323,20 @@ Panel {
     context: Qt.ApplicationShortcut
     enabled: root.opened && (root.configured || root.demoMode)
     onActivated: root.switchNavigation(-1)
+  }
+
+  Shortcut {
+    sequence: "Escape"
+    context: Qt.ApplicationShortcut
+    enabled: root.opened
+    onActivated: root.handleEscape()
+  }
+
+  Shortcut {
+    sequence: "Ctrl+Space"
+    context: Qt.ApplicationShortcut
+    enabled: root.opened && root.activeTrack !== null
+    onActivated: root.control("toggle")
   }
 
   Shortcut {
@@ -386,7 +469,8 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: true
-    focusTarget: searchField
+    focusTarget: (root.configured || root.demoMode)
+      ? (root.view === "queue" ? itemList : searchField) : connectButton
     contentWidth: fittedContentWidth(Style.space(540))
     contentHeight: fittedContentHeight(contentColumn.implicitHeight, Style.space(790))
 
@@ -465,13 +549,38 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
-            PanelSlider {
+            BorderSurface {
+              id: seekFocus
               Layout.fillWidth: true
-              bar: root.bar
-              value: Number(root.player.position) || 0
-              maximum: Math.max(1, Number(root.player.duration) || 1)
-              step: 5
-              onReleased: function(next) { root.control("seek", next) }
+              Layout.preferredHeight: seekSlider.implicitHeight + Style.space(4)
+              radius: Style.cornerRadius
+              color: activeFocus ? Style.focusFillFor(root.foreground, Color.accent) : "transparent"
+              borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent) : Border.none()
+              activeFocusOnTab: true
+              Accessible.role: Accessible.Slider
+              Accessible.name: "Playback position"
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Left || event.key === Qt.Key_Down) {
+                  root.control("seek", Math.max(0, Number(root.player.position) - 5)); event.accepted = true
+                } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up) {
+                  root.control("seek", Math.min(Number(root.player.duration) || 0, Number(root.player.position) + 5)); event.accepted = true
+                } else if (event.key === Qt.Key_Home) {
+                  root.control("seek", 0); event.accepted = true
+                } else if (event.key === Qt.Key_End) {
+                  root.control("seek", Number(root.player.duration) || 0); event.accepted = true
+                }
+              }
+
+              PanelSlider {
+                id: seekSlider
+                anchors.fill: parent
+                anchors.margins: Style.space(2)
+                bar: root.bar
+                value: Number(root.player.position) || 0
+                maximum: Math.max(1, Number(root.player.duration) || 1)
+                step: 5
+                onReleased: function(next) { root.control("seek", next) }
+              }
             }
             Text {
               text: Model.formatTime(root.player.duration)
@@ -492,17 +601,41 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
-            PanelSlider {
-              id: volumeSlider
+            BorderSurface {
+              id: volumeFocus
               Layout.fillWidth: true
-              bar: root.bar
-              value: Number(root.player.volume) || 0
-              minimum: 0
-              maximum: 130
-              step: 5
-              integer: true
-              onMoved: function(next) { root.volumeDragging = true }
-              onReleased: function(next) { root.volumeDragging = false; root.control("volume", next) }
+              Layout.preferredHeight: volumeSlider.implicitHeight + Style.space(4)
+              radius: Style.cornerRadius
+              color: activeFocus ? Style.focusFillFor(root.foreground, Color.accent) : "transparent"
+              borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent) : Border.none()
+              activeFocusOnTab: true
+              Accessible.role: Accessible.Slider
+              Accessible.name: "Volume"
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Left || event.key === Qt.Key_Down) {
+                  root.control("volume", Math.max(0, Number(root.player.volume) - 5)); event.accepted = true
+                } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up) {
+                  root.control("volume", Math.min(130, Number(root.player.volume) + 5)); event.accepted = true
+                } else if (event.key === Qt.Key_Home) {
+                  root.control("volume", 0); event.accepted = true
+                } else if (event.key === Qt.Key_End) {
+                  root.control("volume", 130); event.accepted = true
+                }
+              }
+
+              PanelSlider {
+                id: volumeSlider
+                anchors.fill: parent
+                anchors.margins: Style.space(2)
+                bar: root.bar
+                value: Number(root.player.volume) || 0
+                minimum: 0
+                maximum: 130
+                step: 5
+                integer: true
+                onMoved: function(next) { root.volumeDragging = true }
+                onReleased: function(next) { root.volumeDragging = false; root.control("volume", next) }
+              }
             }
             Text {
               text: Math.round(root.volumeDragging ? volumeSlider.liveValue : Number(root.player.volume) || 0) + "%"
@@ -528,35 +661,41 @@ Panel {
           PanelActionButton {
             iconText: "\uf074"; tooltipText: root.player && root.player.shuffle ? "Shuffle on" : "Shuffle off"
             foreground: root.player && root.player.shuffle ? Color.urgent : root.foreground
-            fontFamily: root.fontFamily; bordered: root.player && root.player.shuffle === true
+            fontFamily: root.fontFamily; bordered: root.player && root.player.shuffle === true; focusable: true
+            Accessible.name: tooltipText
             onClicked: root.control("shuffle")
           }
           PanelActionButton {
             iconText: "\uf048"; tooltipText: "Previous"; foreground: root.foreground; fontFamily: root.fontFamily
+            focusable: true; Accessible.name: tooltipText
             onClicked: root.control("previous")
           }
           PanelActionButton {
             size: Style.space(34)
             iconText: root.player && root.player.playing ? "\uf04c" : "\uf04b"
             tooltipText: root.player && root.player.playing ? "Pause" : "Play"
-            foreground: root.foreground; fontFamily: root.fontFamily; bordered: true
+            foreground: root.foreground; fontFamily: root.fontFamily; bordered: true; focusable: true
+            Accessible.name: tooltipText
             onClicked: root.control("toggle")
           }
           PanelActionButton {
             iconText: "\uf051"; tooltipText: "Next"; foreground: root.foreground; fontFamily: root.fontFamily
+            focusable: true; Accessible.name: tooltipText
             onClicked: root.control("next")
           }
           PanelActionButton {
             iconText: root.player && root.player.repeat === "one" ? "\uf366" : "\uf363"
             tooltipText: root.player && root.player.repeat === "one" ? "Repeat one" : (root.player && root.player.repeat === "all" ? "Repeat all" : "Repeat off")
             foreground: root.player && root.player.repeat !== "off" ? Color.urgent : root.foreground
-            fontFamily: root.fontFamily; bordered: root.player && root.player.repeat !== "off"
+            fontFamily: root.fontFamily; bordered: root.player && root.player.repeat !== "off"; focusable: true
+            Accessible.name: tooltipText
             onClicked: root.control("repeat")
           }
         }
       }
 
       PanelActionButton {
+        id: connectButton
         visible: !root.configured && !root.demoMode
         width: parent.width
         height: Style.space(38)
@@ -564,6 +703,8 @@ Panel {
         foreground: root.foreground
         fontFamily: root.fontFamily
         bordered: true
+        focusable: true
+        Accessible.name: "Connect with Plex"
         onClicked: root.connectPlex()
       }
 
@@ -592,11 +733,13 @@ Panel {
           }
           PanelActionButton {
             iconText: "\uf2f1"; tooltipText: "Retry"; foreground: root.foreground; fontFamily: root.fontFamily
+            focusable: true; Accessible.name: tooltipText
             onClicked: root.retryCurrent()
           }
           PanelActionButton {
             visible: root.health.code === "unauthorized" || root.health.code === "library-missing"
             iconText: "\uf013"; tooltipText: "Reconnect"; foreground: root.foreground; fontFamily: root.fontFamily
+            focusable: true; Accessible.name: tooltipText
             onClicked: root.connectPlex()
           }
         }
@@ -622,8 +765,15 @@ Panel {
               required property var modelData
               width: Style.space(59)
               height: Style.space(34)
-              hasCursor: root.view === modelData.id || (root.view === "children" && root.backStack.length > 0 && root.backStack[0].view === modelData.id)
+              activeFocusOnTab: true
+              hasCursor: activeFocus
+              current: root.view === modelData.id || (root.view === "children" && root.backStack.length > 0 && root.backStack[0].view === modelData.id)
               foreground: root.foreground
+              Accessible.role: Accessible.PageTab
+              Accessible.name: modelData.label
+              Keys.onReturnPressed: root.loadView(modelData.id)
+              Keys.onEnterPressed: root.loadView(modelData.id)
+              Keys.onSpacePressed: root.loadView(modelData.id)
 
               Text {
                 id: navLabel
@@ -649,6 +799,7 @@ Panel {
         visible: (root.configured || root.demoMode) && root.view !== "queue"
         width: parent.width
         placeholderText: "Search Plex…"
+        Accessible.name: "Search Plex music"
         foreground: root.foreground
         font.family: root.fontFamily
         text: root.query
@@ -657,13 +808,10 @@ Panel {
           if (!root.suppressSearch) searchDebounce.restart()
         }
         Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Left) { root.switchNavigation(-1); event.accepted = true }
-          else if (event.key === Qt.Key_Right) { root.switchNavigation(1); event.accepted = true }
-          else if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true }
-          else if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true }
-          else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.items.length > 0) {
-            root.activateItem(root.items[root.selectedIndex]); event.accepted = true
-          } else if (event.key === Qt.Key_Escape && text !== "") { text = ""; event.accepted = true }
+          if (event.key === Qt.Key_Left && text === "") { root.switchNavigation(-1); event.accepted = true }
+          else if (event.key === Qt.Key_Right && text === "") { root.switchNavigation(1); event.accepted = true }
+          else if (event.key === Qt.Key_Escape) { root.handleEscape(); event.accepted = true }
+          else root.handleListKey(event)
         }
       }
 
@@ -677,6 +825,8 @@ Panel {
           tooltipText: "Back"
           foreground: root.foreground
           fontFamily: root.fontFamily
+          focusable: true
+          Accessible.name: tooltipText
           onClicked: root.goBack()
         }
         Text {
@@ -694,16 +844,19 @@ Panel {
         PanelActionButton {
           visible: root.view === "children" && (root.currentParentKind === "album" || root.currentParentKind === "playlist")
           iconText: "\uf04b"; tooltipText: "Play collection"; foreground: root.foreground; fontFamily: root.fontFamily; bordered: true
+          focusable: true; Accessible.name: tooltipText
           onClicked: root.playCollection(false)
         }
         PanelActionButton {
           visible: root.view === "children" && (root.currentParentKind === "album" || root.currentParentKind === "playlist")
           iconText: "\uf074"; tooltipText: "Shuffle collection"; foreground: root.foreground; fontFamily: root.fontFamily
+          focusable: true; Accessible.name: tooltipText
           onClicked: root.playCollection(true)
         }
         PanelActionButton {
           visible: root.view === "queue" && root.items.length > 0
           iconText: "\uf2ed"; tooltipText: "Clear upcoming"; foreground: root.foreground; fontFamily: root.fontFamily
+          focusable: true; Accessible.name: tooltipText
           onClicked: root.runQueueAction("clear-upcoming")
         }
         Text {
@@ -744,6 +897,13 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         model: root.items
         currentIndex: root.selectedIndex
+        activeFocusOnTab: true
+        Accessible.role: Accessible.List
+        Accessible.name: root.view === "queue" ? "Playback queue" : "Media results"
+        Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_Escape) { root.handleEscape(); event.accepted = true }
+          else root.handleListKey(event)
+        }
 
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
@@ -755,6 +915,8 @@ Panel {
           height: Style.space(54)
           hasCursor: root.selectedIndex === index
           foreground: root.foreground
+          Accessible.role: Accessible.ListItem
+          Accessible.name: (modelData.title || "Untitled") + ", " + Model.subtitle(modelData)
 
           MouseArea {
             anchors.fill: parent
@@ -809,6 +971,7 @@ Panel {
             PanelActionButton {
               visible: root.view !== "queue" && mediaRow.modelData.type === "track"
               iconText: "\uf2f9"; tooltipText: "Play next"; foreground: root.foreground; fontFamily: root.fontFamily
+              focusable: true; Accessible.name: tooltipText + ": " + (mediaRow.modelData.title || "track")
               onClicked: root.playNext(mediaRow.modelData)
             }
             Row {
@@ -816,10 +979,12 @@ Panel {
               spacing: Style.space(3)
               PanelActionButton {
                 iconText: "\uf04b"; tooltipText: "Play"; foreground: root.foreground; fontFamily: root.fontFamily
+                focusable: true; Accessible.name: tooltipText + ": " + (mediaRow.modelData.title || "collection")
                 onClicked: root.playItemCollection(mediaRow.modelData, false)
               }
               PanelActionButton {
                 iconText: "\uf074"; tooltipText: "Shuffle"; foreground: root.foreground; fontFamily: root.fontFamily
+                focusable: true; Accessible.name: tooltipText + ": " + (mediaRow.modelData.title || "collection")
                 onClicked: root.playItemCollection(mediaRow.modelData, true)
               }
               Text { text: "\uf054"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
@@ -839,17 +1004,20 @@ Panel {
                 visible: !mediaRow.modelData.current
                 iconText: "\uf062"; tooltipText: "Move up"; foreground: root.foreground; fontFamily: root.fontFamily
                 enabled: mediaRow.index > 0
+                focusable: true; Accessible.name: tooltipText + ": " + (mediaRow.modelData.title || "track")
                 onClicked: root.runQueueAction("move", Number(mediaRow.modelData.queueIndex), Math.max(0, Number(mediaRow.modelData.queueIndex) - 1))
               }
               PanelActionButton {
                 visible: !mediaRow.modelData.current
                 iconText: "\uf063"; tooltipText: "Move down"; foreground: root.foreground; fontFamily: root.fontFamily
                 enabled: mediaRow.index < root.items.length - 1
+                focusable: true; Accessible.name: tooltipText + ": " + (mediaRow.modelData.title || "track")
                 onClicked: root.runQueueAction("move", Number(mediaRow.modelData.queueIndex), Math.min(root.items.length - 1, Number(mediaRow.modelData.queueIndex) + 1))
               }
               PanelActionButton {
                 visible: !mediaRow.modelData.current
                 iconText: "\uf00d"; tooltipText: "Remove"; foreground: root.foreground; fontFamily: root.fontFamily
+                focusable: true; Accessible.name: tooltipText + ": " + (mediaRow.modelData.title || "track")
                 onClicked: root.runQueueAction("remove", Number(mediaRow.modelData.queueIndex))
               }
             }
@@ -860,7 +1028,7 @@ Panel {
       Text {
         visible: root.configured || root.demoMode
         width: parent.width
-        text: "Enter to open/play  ·  Middle-click to pause  ·  Right-click for manual setup"
+        text: "↑↓ Select  ·  Enter Play  ·  ⇧Enter Alt  ·  Ctrl+↑↓ Move  ·  Del Remove  ·  Esc Back"
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

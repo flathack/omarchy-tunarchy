@@ -39,6 +39,15 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("root.switchNavigation(-1)", QML)
         self.assertIn("root.switchNavigation(1)", QML)
 
+    def test_complete_keyboard_navigation_contract(self):
+        self.assertGreaterEqual(QML.count("focusable: true"), 15)
+        self.assertGreaterEqual(QML.count("activeFocusOnTab: true"), 3)
+        for contract in ('sequence: "Escape"', 'sequence: "Ctrl+Space"', "root.handleEscape()",
+                         "moveQueueSelection", "removeSelectedQueueItem", "Accessible.name"):
+            self.assertIn(contract, QML)
+        self.assertIn('event.key === Qt.Key_Left && text === ""', QML)
+        self.assertIn('event.key === Qt.Key_Right && text === ""', QML)
+
     def test_plex_login_and_demo_mode_are_present(self):
         self.assertIn('" login"', QML)
         self.assertIn('setting("demoMode", false)', QML)

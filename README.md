@@ -83,7 +83,16 @@ ${XDG_CONFIG_HOME:-~/.config}/omarchy-omaplex-music/config.json
   favorites, and the active queue.
 - Click a collection to open it, or use its inline play/shuffle actions.
 - Reorder or remove upcoming tracks in the Queue view.
-- Use Up/Down and Enter while the search field is focused.
+- Use Left/Right to switch library tabs when the search field is empty. While
+  editing a query, those keys move the text cursor normally.
+- Use Up/Down to select rows and Enter to open or play them.
+- Use Ctrl+Enter to play a selected album or playlist and Shift+Enter to
+  shuffle it; Shift+Enter queues a selected track next.
+- In Queue, use Ctrl+Up/Down to move a track and Delete to remove it.
+- Use Tab/Shift+Tab to reach sliders, transport controls, tabs, collection
+  actions, and inline Queue actions. Enter or Space activates a focused button.
+- Escape clears an active search, returns from a collection, or closes the
+  panel. Ctrl+Space toggles play/pause from anywhere in the panel.
 - Hardware media keys work through MPRIS while mpv is running.
 
 The CLI is also useful for troubleshooting:
