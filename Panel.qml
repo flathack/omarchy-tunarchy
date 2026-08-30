@@ -551,27 +551,29 @@ Panel {
           clip: true
 
           Image {
+            id: headerCover
             anchors.fill: parent
             source: root.activeTrack ? root.activeTrack.thumb || "" : ""
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
-            visible: status === Image.Ready
+            visible: !root.helpVisible && status === Image.Ready
           }
 
           Text {
             anchors.centerIn: parent
-            visible: parent.children[0].status !== Image.Ready
+            visible: !root.helpVisible && headerCover.status !== Image.Ready
             text: ""
           }
 
           Image {
+            id: helpHeaderLogo
             anchors.centerIn: parent
-            width: Style.space(46)
-            height: Style.space(46)
-            visible: parent.children[0].status !== Image.Ready
+            width: root.helpVisible ? Style.space(64) : Style.space(46)
+            height: width
+            visible: root.helpVisible || headerCover.status !== Image.Ready
             source: root.logoUrl
             fillMode: Image.PreserveAspectFit
-            opacity: 0.8
+            opacity: root.helpVisible ? 1 : 0.8
           }
         }
 
@@ -712,7 +714,8 @@ Panel {
         PanelActionButton {
           id: helpButton
           Layout.alignment: Qt.AlignTop
-          iconText: "?"
+          size: Style.space(28)
+          iconText: ""
           tooltipText: root.helpVisible ? "Close keyboard help" : "Keyboard help"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -723,6 +726,15 @@ Panel {
           onClicked: {
             root.helpVisible = !root.helpVisible
             forceActiveFocus()
+          }
+
+          Image {
+            id: helpButtonLogo
+            anchors.centerIn: parent
+            width: Style.space(22)
+            height: width
+            source: root.logoUrl
+            fillMode: Image.PreserveAspectFit
           }
         }
       }
