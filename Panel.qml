@@ -57,7 +57,13 @@ Panel {
   ]
 
   readonly property url helperUrl: Qt.resolvedUrl("bin/tunarchy")
-  readonly property url logoUrl: Qt.resolvedUrl("assets/tunarchy.svg")
+  readonly property url tunaBrandUrl: Qt.resolvedUrl("assets/tuna-brand.png")
+  readonly property url tuna18Url: Qt.resolvedUrl("assets/tuna-ui-18.png")
+  readonly property url tuna24Url: Qt.resolvedUrl("assets/tuna-ui-24.png")
+  readonly property url tuna64Url: Qt.resolvedUrl("assets/tuna-ui-64.png")
+  readonly property rect tuna18Clip: Qt.rect(520, 325, 500, 360)
+  readonly property rect tuna24Clip: Qt.rect(350, 250, 850, 525)
+  readonly property rect tuna64Clip: Qt.rect(60, 35, 1440, 900)
   readonly property string helperPath: decodeURIComponent(String(helperUrl).replace(/^file:\/\//, ""))
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -503,8 +509,11 @@ Panel {
         Image {
           anchors.fill: parent
           anchors.margins: Style.space(2)
-          source: root.logoUrl
+          source: root.tuna24Url
+          sourceClipRect: root.tuna24Clip
           fillMode: Image.PreserveAspectFit
+          smooth: false
+          mipmap: false
           visible: !barCover.visible
         }
       }
@@ -571,8 +580,11 @@ Panel {
             width: root.helpVisible ? Style.space(64) : Style.space(46)
             height: width
             visible: root.helpVisible || headerCover.status !== Image.Ready
-            source: root.logoUrl
+            source: root.helpVisible ? root.tuna64Url : root.tuna24Url
+            sourceClipRect: root.helpVisible ? root.tuna64Clip : root.tuna24Clip
             fillMode: Image.PreserveAspectFit
+            smooth: false
+            mipmap: false
             opacity: root.helpVisible ? 1 : 0.8
           }
         }
@@ -733,8 +745,11 @@ Panel {
             anchors.centerIn: parent
             width: Style.space(22)
             height: width
-            source: root.logoUrl
+            source: root.tuna24Url
+            sourceClipRect: root.tuna24Clip
             fillMode: Image.PreserveAspectFit
+            smooth: false
+            mipmap: false
           }
         }
       }
@@ -815,12 +830,26 @@ Panel {
             onClicked: root.control("previous")
           }
           PanelActionButton {
+            id: playButton
             size: Style.space(34)
-            iconText: root.player && root.player.playing ? "\uf04c" : "\uf04b"
+            iconText: ""
             tooltipText: root.player && root.player.playing ? "Pause" : "Play"
             foreground: root.foreground; fontFamily: root.fontFamily; bordered: true; focusable: true
             Accessible.name: tooltipText
             onClicked: root.control("toggle")
+
+            Image {
+              id: playButtonTuna
+              anchors.centerIn: parent
+              width: Style.space(27)
+              height: width
+              source: root.tuna18Url
+              sourceClipRect: root.tuna18Clip
+              fillMode: Image.PreserveAspectFit
+              smooth: false
+              mipmap: false
+              opacity: root.player && root.player.playing ? 1 : 0.82
+            }
           }
           PanelActionButton {
             iconText: "\uf051"; tooltipText: "Next"; foreground: root.foreground; fontFamily: root.fontFamily

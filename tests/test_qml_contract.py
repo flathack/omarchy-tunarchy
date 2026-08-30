@@ -29,8 +29,18 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("readonly property string activeThumb", QML)
         self.assertIn("id: barCover", QML)
         self.assertIn("source: root.activeThumb", QML)
+        self.assertIn("source: root.tuna24Url", QML)
         self.assertIn("visible: !barCover.visible", QML)
         self.assertIn("fixedHeight: vertical ? Style.bar.iconSlot", QML)
+
+    def test_tuna_assets_scale_across_player_ui(self):
+        self.assertIn('Qt.resolvedUrl("assets/tuna-ui-18.png")', QML)
+        self.assertIn('Qt.resolvedUrl("assets/tuna-ui-24.png")', QML)
+        self.assertIn('Qt.resolvedUrl("assets/tuna-ui-64.png")', QML)
+        self.assertIn("id: playButtonTuna", QML)
+        self.assertIn("source: root.tuna18Url", QML)
+        self.assertIn("sourceClipRect: root.tuna18Clip", QML)
+        self.assertGreaterEqual(QML.count("smooth: false"), 4)
 
     def test_library_and_queue_navigation_are_present(self):
         for view in ('"artists"', '"albums"', '"playlists"', '"history"', '"frequent"', '"favorites"', '"queue"'):

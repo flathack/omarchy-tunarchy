@@ -161,6 +161,15 @@ omarchy plugin enable io.github.flathack.tunarchy --section center
 
 Files below the plugin folder hot-reload in the Omarchy shell.
 
+### Brand assets
+
+The generated Tuna artwork is stored in four transparent PNG variants:
+
+- `assets/tuna-brand.png` — detailed brand artwork
+- `assets/tuna-ui-18.png` — Play/Pause button sprite
+- `assets/tuna-ui-24.png` — bar and compact help button sprite
+- `assets/tuna-ui-64.png` — keyboard-help header artwork
+
 ## Privacy and limitations
 
 Library requests, cover downloads, and audio streams go directly to the Plex
