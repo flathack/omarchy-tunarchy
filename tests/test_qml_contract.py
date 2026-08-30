@@ -30,6 +30,7 @@ class QmlContractTests(unittest.TestCase):
             self.assertIn(view, QML)
         self.assertIn('runQueueAction("remove"', QML)
         self.assertIn('"play-next"', QML)
+        self.assertGreaterEqual(QML.count("items[selectedIndex].current === true"), 2)
 
     def test_arrow_keys_switch_library_tabs(self):
         self.assertIn('sequence: "Left"', QML)
@@ -38,6 +39,10 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("event.key === Qt.Key_Right", QML)
         self.assertIn("root.switchNavigation(-1)", QML)
         self.assertIn("root.switchNavigation(1)", QML)
+        self.assertIn("readonly property bool navigationShortcutsEnabled", QML)
+        self.assertIn("!searchField.activeFocus", QML)
+        self.assertIn("!seekFocus.activeFocus", QML)
+        self.assertIn("!volumeFocus.activeFocus", QML)
 
     def test_complete_keyboard_navigation_contract(self):
         self.assertGreaterEqual(QML.count("focusable: true"), 15)

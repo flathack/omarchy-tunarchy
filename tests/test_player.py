@@ -1,6 +1,7 @@
+import concurrent.futures
+import contextlib
 import importlib.machinery
 import importlib.util
-import contextlib
 import io
 import json
 import pathlib
@@ -39,6 +40,29 @@ class StorageTests(unittest.TestCase):
             target = pathlib.Path(folder) / "broken.json"
             target.write_text("{", encoding="utf-8")
             self.assertEqual(player.load_json(target, {"ok": False}), {"ok": False})
+
+    def test_atomic_json_supports_concurrent_writers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = pathlib.Path(folder) / "state.json"
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                list(executor.map(lambda index: player.atomic_json(target, {"writer": index}), range(100)))
+            self.assertIn("writer", player.load_json(target, {}))
+            self.assertFalse(list(target.parent.glob("*.tmp")))
+
+    def test_state_lock_serializes_read_modify_write(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "STATE_FILE", pathlib.Path(folder) / "state.json"):
+            player.atomic_json(player.STATE_FILE, {"count": 0})
+
+            def increment(_):
+                with player.state_lock():
+                    state = player.load_json(player.STATE_FILE, {})
+                    state["count"] += 1
+                    player.atomic_json(player.STATE_FILE, state)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                list(executor.map(increment, range(100)))
+            self.assertEqual(player.load_json(player.STATE_FILE, {})["count"], 100)
 
     def test_client_identifier_is_generated_once(self):
         with tempfile.TemporaryDirectory() as folder, \
@@ -128,11 +152,41 @@ class PlexModelTests(unittest.TestCase):
     def test_cached_items_uses_last_good_data_for_network_failure(self):
         with tempfile.TemporaryDirectory() as folder, \
              mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder)):
-            target = player.data_cache_path("albums")
+            target = player.data_cache_path(self.config, "albums")
             player.atomic_json(target, {"items": [{"title": "Cached"}], "cachedAt": 1})
-            result = player.cached_items("albums", lambda: (_ for _ in ()).throw(player.PlayerError("offline", "unreachable")))
+            result = player.cached_items(self.config, "albums", lambda: (_ for _ in ()).throw(player.PlayerError("offline", "unreachable")))
         self.assertTrue(result["stale"])
         self.assertEqual(result["items"][0]["title"], "Cached")
+
+    def test_cache_paths_are_isolated_by_server_and_account(self):
+        first = {"server": "http://plex-a:32400", "token": "first", "section": "4"}
+        second = {"server": "http://plex-b:32400", "token": "second", "section": "4"}
+        self.assertNotEqual(player.data_cache_path(first, "albums"), player.data_cache_path(second, "albums"))
+        self.assertNotEqual(player.cache_namespace(first), player.cache_namespace(second))
+
+    def test_art_cache_does_not_cross_server_boundaries(self):
+        class Response:
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _):
+                return self.value
+
+        first = {"server": "http://plex-a:32400", "token": "first", "section": "4"}
+        second = {"server": "http://plex-b:32400", "token": "second", "section": "4"}
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder)), \
+             mock.patch.object(player.urllib.request, "urlopen", side_effect=[Response(b"first"), Response(b"second")]) as request:
+            first_uri = player.art_path(first, "/library/metadata/1/thumb/2")
+            second_uri = player.art_path(second, "/library/metadata/1/thumb/2")
+        self.assertNotEqual(first_uri, second_uri)
+        self.assertEqual(request.call_count, 2)
 
 
 class AuthenticationTests(unittest.TestCase):
@@ -165,6 +219,13 @@ class AuthenticationTests(unittest.TestCase):
 
 
 class PlayerTests(unittest.TestCase):
+    def setUp(self):
+        self.state_folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_folder.cleanup)
+        self.state_patch = mock.patch.object(player, "STATE_FILE", pathlib.Path(self.state_folder.name) / "state.json")
+        self.state_patch.start()
+        self.addCleanup(self.state_patch.stop)
+
     def test_play_replaces_old_queue_then_appends_album(self):
         queue = [
             {"key": "1", "type": "track", "title": "First"},
@@ -231,6 +292,17 @@ class PlayerTests(unittest.TestCase):
         self.assertEqual(state["queue"], [{"key": "1"}])
         self.assertEqual(len(result["items"]), 1)
 
+    def test_current_queue_track_cannot_be_moved_or_removed(self):
+        state = {"queue": [{"key": "1"}, {"key": "2"}], "repeat": "off", "shuffle": False}
+        with mock.patch.object(player, "state_data", return_value=state), \
+             mock.patch.object(player, "mpv_running", return_value=True), \
+             mock.patch.object(player, "property_or", return_value=1), \
+             mock.patch.object(player, "mpv_command") as command:
+            for action in ("move", "remove"):
+                with self.assertRaisesRegex(player.PlayerError, "currently playing"):
+                    player.queue_action(action, index=1, destination=0)
+        command.assert_not_called()
+
     def test_demo_never_requires_plex(self):
         result = player.demo_dispatch(mock.Mock(command="library", view="artists"))
         self.assertTrue(result["demo"])
@@ -244,7 +316,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.2.3")
+        self.assertEqual(manifest["version"], "0.2.4")
         self.assertTrue((ROOT / "assets" / "omaplex.svg").is_file())
         self.assertTrue((ROOT / "preview.png").is_file())
 

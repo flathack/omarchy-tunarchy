@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
+import fcntl
 import getpass
 import hashlib
 import json
@@ -15,6 +17,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -31,7 +34,7 @@ SOCKET_FILE = CACHE_DIR / "mpv.sock"
 DATA_CACHE_DIR = CACHE_DIR / "data"
 ART_CACHE_DIR = CACHE_DIR / "art"
 APP_NAME = "OmaPlex Music"
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 PLEX_AUTH_URL = "https://plex.tv/api/v2"
 
 
@@ -48,13 +51,28 @@ def ensure_private_dir(path: pathlib.Path) -> None:
 
 def atomic_json(path: pathlib.Path, value: Any, mode: int = 0o600) -> None:
     ensure_private_dir(path.parent)
-    temporary = path.with_name(path.name + ".tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    descriptor = os.open(temporary, flags, mode)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    temporary = pathlib.Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def atomic_bytes(path: pathlib.Path, value: bytes, mode: int = 0o600) -> None:
+    ensure_private_dir(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    temporary = pathlib.Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)
@@ -323,11 +341,20 @@ def maybe_cleanup_cache(interval_hours: int = 24) -> None:
         pass
 
 
+def cache_namespace(config: dict[str, Any]) -> str:
+    identity = "\0".join((
+        str(config.get("server", "")).strip().rstrip("/"),
+        str(config.get("section", "")),
+        str(config.get("token", "")),
+    ))
+    return hashlib.sha256(identity.encode()).hexdigest()[:16]
+
+
 def art_path(config: dict[str, Any], source: str | None) -> str:
     if not source:
         return ""
     ensure_private_dir(ART_CACHE_DIR)
-    digest = hashlib.sha256(source.encode()).hexdigest()[:24]
+    digest = hashlib.sha256(f"{cache_namespace(config)}\0{source}".encode()).hexdigest()[:24]
     target = ART_CACHE_DIR / f"{digest}.jpg"
     if target.exists() and target.stat().st_size > 0:
         try:
@@ -340,10 +367,9 @@ def art_path(config: dict[str, Any], source: str | None) -> str:
     request = urllib.request.Request(url + separator + urllib.parse.urlencode({"X-Plex-Token": config["token"]}))
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
-            data = response.read(4 * 1024 * 1024)
-        if data:
-            target.write_bytes(data)
-            target.chmod(0o600)
+            data = response.read(4 * 1024 * 1024 + 1)
+        if data and len(data) <= 4 * 1024 * 1024:
+            atomic_bytes(target, data)
             return target.as_uri()
     except (OSError, urllib.error.URLError, TimeoutError):
         pass
@@ -380,13 +406,13 @@ def compact_items(config: dict[str, Any], rows: list[dict[str, Any]]) -> list[di
     return items
 
 
-def data_cache_path(name: str) -> pathlib.Path:
-    digest = hashlib.sha256(name.encode()).hexdigest()[:24]
+def data_cache_path(config: dict[str, Any], name: str) -> pathlib.Path:
+    digest = hashlib.sha256(f"{cache_namespace(config)}\0{name}".encode()).hexdigest()[:24]
     return DATA_CACHE_DIR / f"{digest}.json"
 
 
-def cached_items(name: str, loader: Any) -> dict[str, Any]:
-    target = data_cache_path(name)
+def cached_items(config: dict[str, Any], name: str, loader: Any) -> dict[str, Any]:
+    target = data_cache_path(config, name)
     try:
         items = loader()
         payload = {"items": items, "stale": False, "cachedAt": int(time.time())}
@@ -559,9 +585,27 @@ def state_data() -> dict[str, Any]:
     return state
 
 
-def save_state(state: dict[str, Any]) -> None:
+@contextlib.contextmanager
+def state_lock() -> Any:
+    lock_path = STATE_FILE.with_name(STATE_FILE.name + ".lock")
+    ensure_private_dir(lock_path.parent)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def save_state_unlocked(state: dict[str, Any]) -> None:
     state["updated"] = int(time.time())
     atomic_json(STATE_FILE, state)
+
+
+def save_state(state: dict[str, Any]) -> None:
+    with state_lock():
+        save_state_unlocked(state)
 
 
 def public_item(item: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -570,23 +614,25 @@ def public_item(item: dict[str, Any] | None) -> dict[str, Any] | None:
     return {key: value for key, value in item.items() if not key.startswith("_")}
 
 
-def sync_queue_from_mpv(state: dict[str, Any]) -> dict[str, Any]:
-    if not mpv_running():
+def sync_queue_from_mpv() -> dict[str, Any]:
+    with state_lock():
+        state = state_data()
+        if not mpv_running():
+            return state
+        playlist = property_or("playlist", [])
+        queue = state.get("queue", [])
+        if not isinstance(playlist, list) or not isinstance(queue, list):
+            return state
+        by_hash = {item.get("_streamHash"): item for item in queue if isinstance(item, dict) and item.get("_streamHash")}
+        reordered = []
+        for entry in playlist:
+            digest = hashlib.sha256(str(entry.get("filename", "")).encode()).hexdigest()
+            if digest in by_hash:
+                reordered.append(by_hash[digest])
+        if reordered and (len(reordered) != len(queue) or any(a is not b for a, b in zip(reordered, queue))):
+            state["queue"] = reordered
+            save_state_unlocked(state)
         return state
-    playlist = property_or("playlist", [])
-    queue = state.get("queue", [])
-    if not isinstance(playlist, list) or not isinstance(queue, list):
-        return state
-    by_hash = {item.get("_streamHash"): item for item in queue if isinstance(item, dict) and item.get("_streamHash")}
-    reordered = []
-    for entry in playlist:
-        digest = hashlib.sha256(str(entry.get("filename", "")).encode()).hexdigest()
-        if digest in by_hash:
-            reordered.append(by_hash[digest])
-    if reordered and (len(reordered) != len(queue) or any(a is not b for a, b in zip(reordered, queue))):
-        state["queue"] = reordered
-        save_state(state)
-    return state
 
 
 def play(config: dict[str, Any], track_key: str, album_key: str | None,
@@ -614,9 +660,10 @@ def play(config: dict[str, Any], track_key: str, album_key: str | None,
         if index == 0:
             mpv_command(["set_property", "pause", False])
     mpv_command(["set_property", "playlist-pos", 0])
-    state = state_data()
-    state.update({"queue": full_queue, "shuffle": shuffle})
-    save_state(state)
+    with state_lock():
+        state = state_data()
+        state.update({"queue": full_queue, "shuffle": shuffle})
+        save_state_unlocked(state)
     return status(config)
 
 
@@ -629,7 +676,7 @@ def play_collection(config: dict[str, Any], kind: str, key: str, shuffle: bool =
 
 
 def queue_view() -> dict[str, Any]:
-    state = sync_queue_from_mpv(state_data())
+    state = sync_queue_from_mpv()
     queue = state.get("queue", [])
     index = int(property_or("playlist-pos", 0) or 0) if mpv_running() else 0
     items = []
@@ -642,41 +689,45 @@ def queue_view() -> dict[str, Any]:
 
 def queue_action(action: str, index: int | None = None, destination: int | None = None,
                  track_key: str = "") -> dict[str, Any]:
-    state = state_data()
-    queue = state.get("queue", [])
-    if not isinstance(queue, list):
-        queue = []
-    current = int(property_or("playlist-pos", 0) or 0) if mpv_running() else 0
-    if action == "remove" and index is not None and 0 <= index < len(queue):
-        if mpv_running():
-            mpv_command(["playlist-remove", index])
-        queue.pop(index)
-    elif action == "move" and index is not None and destination is not None and 0 <= index < len(queue):
-        target = max(0, min(len(queue) - 1, destination))
-        if mpv_running():
-            mpv_command(["playlist-move", index, target])
-        item = queue.pop(index)
-        queue.insert(target, item)
-    elif action == "clear-upcoming":
-        for position in range(len(queue) - 1, current, -1):
-            if mpv_running():
-                mpv_command(["playlist-remove", position])
-            queue.pop(position)
-    elif action == "play" and index is not None and 0 <= index < len(queue):
-        if mpv_running():
-            mpv_command(["set_property", "playlist-pos", index])
-    elif action == "play-next" and track_key:
-        config = load_config()
-        item, part = raw_track(config, track_key)
-        url = stream_url(config, part)
-        item["_streamHash"] = hashlib.sha256(url.encode()).hexdigest()
-        start_mpv()
-        mpv_command(["loadfile", url, "insert-next"])
-        queue.insert(min(len(queue), current + 1), item)
-    else:
-        raise PlayerError("That queue action is not available.", "invalid-queue-action")
-    state["queue"] = queue
-    save_state(state)
+    with state_lock():
+        state = state_data()
+        queue = state.get("queue", [])
+        if not isinstance(queue, list):
+            queue = []
+        running = mpv_running()
+        current = int(property_or("playlist-pos", 0) or 0) if running else 0
+        if action in ("remove", "move") and index == current:
+            raise PlayerError("The currently playing track cannot be moved or removed.", "current-track")
+        if action == "remove" and index is not None and 0 <= index < len(queue):
+            if running:
+                mpv_command(["playlist-remove", index])
+            queue.pop(index)
+        elif action == "move" and index is not None and destination is not None and 0 <= index < len(queue):
+            target = max(0, min(len(queue) - 1, destination))
+            if running:
+                mpv_command(["playlist-move", index, target])
+            item = queue.pop(index)
+            queue.insert(target, item)
+        elif action == "clear-upcoming":
+            for position in range(len(queue) - 1, current, -1):
+                if running:
+                    mpv_command(["playlist-remove", position])
+                queue.pop(position)
+        elif action == "play" and index is not None and 0 <= index < len(queue):
+            if running:
+                mpv_command(["set_property", "playlist-pos", index])
+        elif action == "play-next" and track_key:
+            config = load_config()
+            item, part = raw_track(config, track_key)
+            url = stream_url(config, part)
+            item["_streamHash"] = hashlib.sha256(url.encode()).hexdigest()
+            start_mpv()
+            mpv_command(["loadfile", url, "insert-next"])
+            queue.insert(min(len(queue), current + 1), item)
+        else:
+            raise PlayerError("That queue action is not available.", "invalid-queue-action")
+        state["queue"] = queue
+        save_state_unlocked(state)
     return queue_view()
 
 
@@ -691,7 +742,7 @@ def property_or(name: str, fallback: Any) -> Any:
 def status(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or load_config(False)
     configured = bool(config)
-    state = sync_queue_from_mpv(state_data())
+    state = sync_queue_from_mpv()
     queue = state.get("queue", []) if isinstance(state, dict) else []
     if not mpv_running():
         return {"configured": configured, "playing": False, "paused": False,
@@ -734,30 +785,32 @@ def control(action: str, value: float | None = None) -> dict[str, Any]:
     elif action == "volume" and value is not None:
         mpv_command(["set_property", "volume", max(0, min(130, value))])
     elif action == "shuffle":
-        state = state_data()
-        enabled = not bool(state.get("shuffle"))
-        if enabled:
-            mpv_command(["playlist-shuffle"])
-            playlist = property_or("playlist", [])
-            by_hash = {item.get("_streamHash"): item for item in state.get("queue", []) if item.get("_streamHash")}
-            reordered = []
-            for entry in playlist if isinstance(playlist, list) else []:
-                digest = hashlib.sha256(str(entry.get("filename", "")).encode()).hexdigest()
-                if digest in by_hash:
-                    reordered.append(by_hash[digest])
-            if len(reordered) == len(state.get("queue", [])):
-                state["queue"] = reordered
-        state["shuffle"] = enabled
-        save_state(state)
+        with state_lock():
+            state = state_data()
+            enabled = not bool(state.get("shuffle"))
+            if enabled:
+                mpv_command(["playlist-shuffle"])
+                playlist = property_or("playlist", [])
+                by_hash = {item.get("_streamHash"): item for item in state.get("queue", []) if item.get("_streamHash")}
+                reordered = []
+                for entry in playlist if isinstance(playlist, list) else []:
+                    digest = hashlib.sha256(str(entry.get("filename", "")).encode()).hexdigest()
+                    if digest in by_hash:
+                        reordered.append(by_hash[digest])
+                if len(reordered) == len(state.get("queue", [])):
+                    state["queue"] = reordered
+            state["shuffle"] = enabled
+            save_state_unlocked(state)
     elif action == "repeat":
-        state = state_data()
-        modes = ("off", "all", "one")
-        current = str(state.get("repeat", "off"))
-        mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else "off"
-        mpv_command(["set_property", "loop-file", "inf" if mode == "one" else "no"])
-        mpv_command(["set_property", "loop-playlist", "inf" if mode == "all" else "no"])
-        state["repeat"] = mode
-        save_state(state)
+        with state_lock():
+            state = state_data()
+            modes = ("off", "all", "one")
+            current = str(state.get("repeat", "off"))
+            mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else "off"
+            mpv_command(["set_property", "loop-file", "inf" if mode == "one" else "no"])
+            mpv_command(["set_property", "loop-playlist", "inf" if mode == "all" else "no"])
+            state["repeat"] = mode
+            save_state_unlocked(state)
     else:
         raise PlayerError("Unknown player action.")
     time.sleep(0.04)
@@ -950,11 +1003,11 @@ def main() -> int:
             result = status()
         elif args.command == "recent":
             config = load_config()
-            result = cached_items(f"recent-{args.limit}", lambda: recent(config, args.limit))
+            result = cached_items(config, f"recent-{args.limit}", lambda: recent(config, args.limit))
             result["library"] = config.get("sectionTitle", "Music")
         elif args.command == "library":
             config = load_config()
-            result = cached_items(f"library-{config.get('section', '')}-{args.view}-{args.limit}",
+            result = cached_items(config, f"library-{config.get('section', '')}-{args.view}-{args.limit}",
                                   lambda: library_list(config, args.view, args.limit))
             result.update({"view": args.view, "library": config.get("sectionTitle", "Music")})
         elif args.command == "search":
@@ -965,7 +1018,7 @@ def main() -> int:
         elif args.command == "children":
             config = load_config()
             loader = artist_albums if args.kind == "artist" else (playlist_tracks if args.kind == "playlist" else album_tracks)
-            result = cached_items(f"children-{args.kind}-{args.key}", lambda: loader(config, args.key))
+            result = cached_items(config, f"children-{args.kind}-{args.key}", lambda: loader(config, args.key))
             result.update({"kind": args.kind, "key": args.key})
         elif args.command == "play":
             result = play(load_config(), args.track, args.album, args.playlist, args.shuffle)

@@ -66,6 +66,8 @@ Panel {
   readonly property bool configured: player && player.configured === true
   readonly property string barText: Model.barLabel(player)
   readonly property bool demoMode: setting("demoMode", false) === true
+  readonly property bool navigationShortcutsEnabled: opened && (configured || demoMode)
+    && !helpVisible && !searchField.activeFocus && !seekFocus.activeFocus && !volumeFocus.activeFocus
 
   function command(args) {
     var result = [helperPath]
@@ -284,6 +286,7 @@ Panel {
 
   function moveQueueSelection(delta) {
     if (view !== "queue" || items.length === 0) return
+    if (items[selectedIndex].current === true) return
     var destination = Math.max(0, Math.min(items.length - 1, selectedIndex + delta))
     if (destination === selectedIndex) return
     pendingSelectedIndex = destination
@@ -292,6 +295,7 @@ Panel {
 
   function removeSelectedQueueItem() {
     if (view !== "queue" || items.length === 0) return
+    if (items[selectedIndex].current === true) return
     pendingSelectedIndex = Math.max(0, Math.min(items.length - 2, selectedIndex))
     runQueueAction("remove", Number(items[selectedIndex].queueIndex))
   }
@@ -342,7 +346,7 @@ Panel {
   Shortcut {
     sequence: "Left"
     context: Qt.ApplicationShortcut
-    enabled: root.opened && (root.configured || root.demoMode)
+    enabled: root.navigationShortcutsEnabled
     onActivated: root.switchNavigation(-1)
   }
 
@@ -373,7 +377,7 @@ Panel {
   Shortcut {
     sequence: "Right"
     context: Qt.ApplicationShortcut
-    enabled: root.opened && (root.configured || root.demoMode)
+    enabled: root.navigationShortcutsEnabled
     onActivated: root.switchNavigation(1)
   }
 
