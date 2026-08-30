@@ -31,6 +31,14 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('runQueueAction("remove"', QML)
         self.assertIn('"play-next"', QML)
 
+    def test_arrow_keys_switch_library_tabs(self):
+        self.assertIn('sequence: "Left"', QML)
+        self.assertIn('sequence: "Right"', QML)
+        self.assertIn("event.key === Qt.Key_Left", QML)
+        self.assertIn("event.key === Qt.Key_Right", QML)
+        self.assertIn("root.switchNavigation(-1)", QML)
+        self.assertIn("root.switchNavigation(1)", QML)
+
     def test_plex_login_and_demo_mode_are_present(self):
         self.assertIn('" login"', QML)
         self.assertIn('setting("demoMode", false)', QML)

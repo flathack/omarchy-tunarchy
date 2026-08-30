@@ -181,9 +181,11 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "atomic_json"), \
              mock.patch.object(player, "status", return_value={"playing": True}):
             result = player.play({"server": "http://plex", "token": "tok"}, "2", "album")
+        self.assertIn("/part/2", command.call_args_list[0].args[0][1])
         self.assertEqual(command.call_args_list[0].args[0][-1], "replace")
-        self.assertEqual(command.call_args_list[1].args[0][-1], "append")
-        self.assertEqual(command.call_args_list[2].args[0], ["set_property", "playlist-pos", 1])
+        self.assertEqual(command.call_args_list[1].args[0], ["set_property", "pause", False])
+        self.assertEqual(command.call_args_list[2].args[0][-1], "append")
+        self.assertEqual(command.call_args_list[3].args[0], ["set_property", "playlist-pos", 0])
         self.assertTrue(result["playing"])
 
     def test_control_clamps_volume(self):
@@ -242,7 +244,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.2.0")
+        self.assertEqual(manifest["version"], "0.2.1")
         self.assertTrue((ROOT / "assets" / "omaplex.svg").is_file())
         self.assertTrue((ROOT / "preview.png").is_file())
 

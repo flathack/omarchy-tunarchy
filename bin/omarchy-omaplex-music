@@ -31,7 +31,7 @@ SOCKET_FILE = CACHE_DIR / "mpv.sock"
 DATA_CACHE_DIR = CACHE_DIR / "data"
 ART_CACHE_DIR = CACHE_DIR / "art"
 APP_NAME = "OmaPlex Music"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 PLEX_AUTH_URL = "https://plex.tv/api/v2"
 
 
@@ -602,17 +602,18 @@ def play(config: dict[str, Any], track_key: str, album_key: str | None,
         queue = [selected_item] + rest
         track_key = selected_item["key"]
     start_mpv()
+    selected = next((index for index, item in enumerate(queue) if item["key"] == track_key), 0)
+    queue = [*queue[selected:], *queue[:selected]]
     full_queue: list[dict[str, Any]] = []
-    selected = 0
     for index, item in enumerate(queue):
         detailed, part = raw_track(config, item["key"])
         full_queue.append(detailed)
-        if item["key"] == track_key:
-            selected = index
         url = stream_url(config, part)
         detailed["_streamHash"] = hashlib.sha256(url.encode()).hexdigest()
         mpv_command(["loadfile", url, "replace" if index == 0 else "append"])
-    mpv_command(["set_property", "playlist-pos", selected])
+        if index == 0:
+            mpv_command(["set_property", "pause", False])
+    mpv_command(["set_property", "playlist-pos", 0])
     state = state_data()
     state.update({"queue": full_queue, "shuffle": shuffle})
     save_state(state)

@@ -237,6 +237,32 @@ Panel {
     Qt.callLater(function() { itemList.positionViewAtIndex(selectedIndex, ListView.Contain) })
   }
 
+  function switchNavigation(delta) {
+    if ((!configured && !demoMode) || navigation.length === 0) return
+    var activeView = view
+    if (view === "children" && backStack.length > 0) activeView = backStack[0].view
+    var current = 0
+    for (var index = 0; index < navigation.length; index++) {
+      if (navigation[index].id === activeView) { current = index; break }
+    }
+    var next = (current + delta + navigation.length) % navigation.length
+    loadView(navigation[next].id)
+  }
+
+  Shortcut {
+    sequence: "Left"
+    context: Qt.ApplicationShortcut
+    enabled: root.opened && (root.configured || root.demoMode)
+    onActivated: root.switchNavigation(-1)
+  }
+
+  Shortcut {
+    sequence: "Right"
+    context: Qt.ApplicationShortcut
+    enabled: root.opened && (root.configured || root.demoMode)
+    onActivated: root.switchNavigation(1)
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -631,7 +657,9 @@ Panel {
           if (!root.suppressSearch) searchDebounce.restart()
         }
         Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true }
+          if (event.key === Qt.Key_Left) { root.switchNavigation(-1); event.accepted = true }
+          else if (event.key === Qt.Key_Right) { root.switchNavigation(1); event.accepted = true }
+          else if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true }
           else if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true }
           else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.items.length > 0) {
             root.activateItem(root.items[root.selectedIndex]); event.accepted = true

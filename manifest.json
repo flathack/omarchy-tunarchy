@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "flathack.omaplex-music",
   "name": "OmaPlex Music",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "flathack",
   "license": "MIT",
   "description": "Browse and play a Plex music library from the Omarchy bar.",
