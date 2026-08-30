@@ -13,11 +13,11 @@ import json
 import os
 import pathlib
 import random
+import secrets
 import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -34,8 +34,12 @@ SOCKET_FILE = CACHE_DIR / "mpv.sock"
 DATA_CACHE_DIR = CACHE_DIR / "data"
 ART_CACHE_DIR = CACHE_DIR / "art"
 APP_NAME = "OmaPlex Music"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 PLEX_AUTH_URL = "https://plex.tv/api/v2"
+CONFIG_MAX_BYTES = 64 * 1024
+STATE_MAX_BYTES = 8 * 1024 * 1024
+DATA_MAX_BYTES = 16 * 1024 * 1024
+ART_MAX_BYTES = 4 * 1024 * 1024
 
 
 class PlayerError(RuntimeError):
@@ -44,61 +48,202 @@ class PlayerError(RuntimeError):
         self.code = code
 
 
+def directory_open_flags() -> int:
+    required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+    if not all(hasattr(os, name) for name in required):
+        raise PlayerError("Secure local storage is unavailable on this system.", "local-security")
+    return os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def validate_directory(descriptor: int, label: str, system_owner: int, private: bool = False) -> None:
+    details = os.fstat(descriptor)
+    mode = stat.S_IMODE(details.st_mode)
+    owner = os.geteuid()
+    if not stat.S_ISDIR(details.st_mode):
+        raise PlayerError(f"{label} is not a directory.", "local-security")
+    if details.st_uid not in (system_owner, owner):
+        raise PlayerError(f"{label} has an unsafe owner.", "local-security")
+    if private:
+        if details.st_uid != owner or mode != 0o700:
+            raise PlayerError(f"{label} must be owned by you with mode 0700.", "local-security")
+    elif mode & 0o022 and not mode & stat.S_ISVTX:
+        raise PlayerError(f"{label} has unsafe permissions.", "local-security")
+
+
+@contextlib.contextmanager
+def secure_parent_directory(path: pathlib.Path, create: bool = False) -> Any:
+    absolute = pathlib.Path(os.path.abspath(os.fspath(path)))
+    filename = absolute.name
+    if not filename or filename in (".", ".."):
+        raise PlayerError("The local storage path is invalid.", "local-security")
+    flags = directory_open_flags()
+    try:
+        descriptor = os.open("/", flags)
+    except OSError as error:
+        raise PlayerError("The filesystem root could not be opened safely.", "local-security") from error
+    try:
+        system_owner = os.fstat(descriptor).st_uid
+        validate_directory(descriptor, "/", system_owner)
+        components = absolute.parent.parts[1:]
+        for index, component in enumerate(components):
+            final = index == len(components) - 1
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                except OSError as error:
+                    raise PlayerError(f"{component} could not be created safely.", "local-security") from error
+                try:
+                    child = os.open(component, flags, dir_fd=descriptor)
+                except OSError as error:
+                    raise PlayerError(f"{component} could not be opened safely.", "local-security") from error
+            except OSError as error:
+                raise PlayerError(f"{component} could not be opened safely.", "local-security") from error
+            try:
+                validate_directory(child, component, system_owner, private=final)
+            except Exception:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor, filename
+    finally:
+        os.close(descriptor)
+
+
 def ensure_private_dir(path: pathlib.Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.chmod(0o700)
+    with secure_parent_directory(path / ".directory-check", create=True):
+        pass
 
 
-def atomic_json(path: pathlib.Path, value: Any, mode: int = 0o600) -> None:
-    ensure_private_dir(path.parent)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    temporary = pathlib.Path(temporary_name)
+def write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        try:
+            written = os.write(descriptor, payload[offset:])
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("The local storage write made no progress.")
+        offset += written
+
+
+def atomic_bytes(path: pathlib.Path, value: bytes, mode: int = 0o600, maximum: int = 16 * 1024 * 1024) -> None:
+    if mode != 0o600 or len(value) > maximum:
+        raise PlayerError("Local data exceeded its security policy.", "local-security")
+    with secure_parent_directory(path, create=True) as (parent, filename):
+        descriptor = -1
+        temporary = ""
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        for _ in range(16):
+            temporary = f".{filename}.{secrets.token_hex(16)}.tmp"
+            try:
+                descriptor = os.open(temporary, flags, mode, dir_fd=parent)
+                break
+            except FileExistsError:
+                continue
+            except OSError as error:
+                raise PlayerError(f"{filename} could not be created safely.", "local-security") from error
+        if descriptor < 0:
+            raise PlayerError(f"{filename} could not create a unique temporary file.", "local-security")
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) != mode:
+                raise PlayerError(f"{filename} temporary file is unsafe.", "local-security")
+            write_all(descriptor, value)
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            os.replace(temporary, filename, src_dir_fd=parent, dst_dir_fd=parent)
+            temporary = ""
+            os.fsync(parent)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=parent)
+
+
+def atomic_json(path: pathlib.Path, value: Any, mode: int = 0o600, maximum: int = 16 * 1024 * 1024) -> None:
+    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    atomic_bytes(path, payload, mode, maximum)
+
+
+def read_regular_file(path: pathlib.Path, maximum: int = 16 * 1024 * 1024) -> bytes:
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
+    with secure_parent_directory(path) as (parent, filename):
+        try:
+            descriptor = os.open(filename, flags, dir_fd=parent)
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise PlayerError(f"{filename} could not be opened safely.", "local-security") from error
+        try:
+            details = os.fstat(descriptor)
+            mode = stat.S_IMODE(details.st_mode)
+            if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid() or mode & 0o077:
+                raise PlayerError(f"{filename} must be a private regular file owned by you.", "local-security")
+            if details.st_size > maximum:
+                raise PlayerError(f"{filename} exceeded its size limit.", "local-security")
+            payload = bytearray()
+            while len(payload) <= maximum:
+                chunk = os.read(descriptor, min(65536, maximum + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > maximum:
+                raise PlayerError(f"{filename} exceeded its size limit.", "local-security")
+            return bytes(payload)
+        finally:
+            os.close(descriptor)
+
+
+def load_json(path: pathlib.Path, fallback: Any, maximum: int = 16 * 1024 * 1024) -> Any:
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def atomic_bytes(path: pathlib.Path, value: bytes, mode: int = 0o600) -> None:
-    ensure_private_dir(path.parent)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    temporary = pathlib.Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(value)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def load_json(path: pathlib.Path, fallback: Any) -> Any:
-    try:
-        with path.open(encoding="utf-8") as stream:
-            return json.load(stream)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return json.loads(read_regular_file(path, maximum).decode("utf-8"))
+    except FileNotFoundError:
+        return fallback
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return fallback
 
 
+def secure_stat(path: pathlib.Path) -> os.stat_result | None:
+    try:
+        with secure_parent_directory(path) as (parent, filename):
+            return os.stat(filename, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def secure_unlink(path: pathlib.Path) -> None:
+    with secure_parent_directory(path) as (parent, filename):
+        try:
+            os.unlink(filename, dir_fd=parent)
+            os.fsync(parent)
+        except FileNotFoundError:
+            return
+
+
+def secure_utime(path: pathlib.Path) -> None:
+    with secure_parent_directory(path) as (parent, filename):
+        os.utime(filename, None, dir_fd=parent, follow_symlinks=False)
+
+
 def load_settings() -> dict[str, Any]:
-    data = load_json(CONFIG_FILE, {})
+    data = load_json(CONFIG_FILE, {}, CONFIG_MAX_BYTES)
     return data if isinstance(data, dict) else {}
 
 
 def save_settings(changes: dict[str, Any]) -> dict[str, Any]:
     data = load_settings()
     data.update(changes)
-    atomic_json(CONFIG_FILE, data)
+    atomic_json(CONFIG_FILE, data, maximum=CONFIG_MAX_BYTES)
     return data
 
 
@@ -247,14 +392,14 @@ def login(server: str, section: str = "", no_browser: bool = False) -> dict[str,
         "accountConnectedAt": int(time.time()),
     }
     choose_music_library(candidate, section, interactive=True)
-    atomic_json(CONFIG_FILE, candidate)
+    atomic_json(CONFIG_FILE, candidate, maximum=CONFIG_MAX_BYTES)
     return {"connected": True, "server": server, "library": candidate["sectionTitle"]}
 
 
 def logout() -> dict[str, Any]:
     data = load_settings()
     preserved = {"clientIdentifier": data.get("clientIdentifier") or client_identifier()}
-    atomic_json(CONFIG_FILE, preserved)
+    atomic_json(CONFIG_FILE, preserved, maximum=CONFIG_MAX_BYTES)
     return {"connected": False}
 
 
@@ -284,27 +429,28 @@ def music_section(config: dict[str, Any]) -> str:
 
 
 def cleanup_cache(max_age_days: int = 30, max_bytes: int = 256 * 1024 * 1024) -> dict[str, int]:
-    if not CACHE_DIR.exists():
-        return {"removed": 0, "bytes": 0}
     now = time.time()
     candidates: list[tuple[float, int, pathlib.Path]] = []
     for folder in (ART_CACHE_DIR, DATA_CACHE_DIR):
-        if not folder.exists():
+        try:
+            with secure_parent_directory(folder / ".scan") as (parent, _):
+                with os.scandir(parent) as entries:
+                    for entry in entries:
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                            if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid():
+                                candidates.append((info.st_mtime, info.st_size, folder / entry.name))
+                        except OSError:
+                            continue
+        except FileNotFoundError:
             continue
-        for path in folder.glob("*"):
-            try:
-                if path.is_file() and not path.is_symlink():
-                    info = path.stat()
-                    candidates.append((info.st_mtime, info.st_size, path))
-            except OSError:
-                continue
     removed = 0
     removed_bytes = 0
     kept: list[tuple[float, int, pathlib.Path]] = []
     for modified, size, path in candidates:
         if now - modified > max_age_days * 86400:
             try:
-                path.unlink()
+                secure_unlink(path)
                 removed += 1
                 removed_bytes += size
             except OSError:
@@ -316,7 +462,7 @@ def cleanup_cache(max_age_days: int = 30, max_bytes: int = 256 * 1024 * 1024) ->
         if total <= max_bytes:
             break
         try:
-            path.unlink()
+            secure_unlink(path)
             total -= size
             removed += 1
             removed_bytes += size
@@ -328,16 +474,15 @@ def cleanup_cache(max_age_days: int = 30, max_bytes: int = 256 * 1024 * 1024) ->
 def maybe_cleanup_cache(interval_hours: int = 24) -> None:
     marker = CACHE_DIR / ".last-cleanup"
     try:
-        if marker.exists() and time.time() - marker.stat().st_mtime < interval_hours * 3600:
+        marker_info = secure_stat(marker)
+        if marker_info and stat.S_ISREG(marker_info.st_mode) and time.time() - marker_info.st_mtime < interval_hours * 3600:
             return
-    except OSError:
+    except (OSError, PlayerError):
         pass
     cleanup_cache()
-    ensure_private_dir(CACHE_DIR)
     try:
-        marker.touch(mode=0o600)
-        marker.chmod(0o600)
-    except OSError:
+        atomic_bytes(marker, b"", maximum=1)
+    except (OSError, PlayerError):
         pass
 
 
@@ -356,9 +501,11 @@ def art_path(config: dict[str, Any], source: str | None) -> str:
     ensure_private_dir(ART_CACHE_DIR)
     digest = hashlib.sha256(f"{cache_namespace(config)}\0{source}".encode()).hexdigest()[:24]
     target = ART_CACHE_DIR / f"{digest}.jpg"
-    if target.exists() and target.stat().st_size > 0:
+    target_info = secure_stat(target)
+    if target_info and stat.S_ISREG(target_info.st_mode) and target_info.st_uid == os.geteuid() \
+            and stat.S_IMODE(target_info.st_mode) == 0o600 and target_info.st_size > 0:
         try:
-            os.utime(target, None)
+            secure_utime(target)
         except OSError:
             pass
         return target.as_uri()
@@ -367,9 +514,9 @@ def art_path(config: dict[str, Any], source: str | None) -> str:
     request = urllib.request.Request(url + separator + urllib.parse.urlencode({"X-Plex-Token": config["token"]}))
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
-            data = response.read(4 * 1024 * 1024 + 1)
-        if data and len(data) <= 4 * 1024 * 1024:
-            atomic_bytes(target, data)
+            data = response.read(ART_MAX_BYTES + 1)
+        if data and len(data) <= ART_MAX_BYTES:
+            atomic_bytes(target, data, maximum=ART_MAX_BYTES)
             return target.as_uri()
     except (OSError, urllib.error.URLError, TimeoutError):
         pass
@@ -416,10 +563,10 @@ def cached_items(config: dict[str, Any], name: str, loader: Any) -> dict[str, An
     try:
         items = loader()
         payload = {"items": items, "stale": False, "cachedAt": int(time.time())}
-        atomic_json(target, payload)
+        atomic_json(target, payload, maximum=DATA_MAX_BYTES)
         return payload
     except PlayerError as error:
-        cached = load_json(target, {})
+        cached = load_json(target, {}, DATA_MAX_BYTES)
         if error.code in ("unreachable", "dns", "timeout") and isinstance(cached, dict) and cached.get("items"):
             cached["stale"] = True
             cached["warning"] = str(error)
@@ -527,15 +674,19 @@ def mpv_command(command: list[Any], expect_reply: bool = False) -> Any:
 
 
 def mpv_running() -> bool:
-    if not SOCKET_FILE.exists():
+    socket_info = secure_stat(SOCKET_FILE)
+    if socket_info is None:
+        return False
+    if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != os.geteuid():
+        secure_unlink(SOCKET_FILE)
         return False
     try:
         mpv_command(["get_property", "idle-active"], True)
         return True
     except (OSError, PlayerError, json.JSONDecodeError):
         try:
-            SOCKET_FILE.unlink()
-        except OSError:
+            secure_unlink(SOCKET_FILE)
+        except (OSError, PlayerError):
             pass
         return False
 
@@ -576,7 +727,7 @@ def stream_url(config: dict[str, Any], part: str) -> str:
 
 
 def state_data() -> dict[str, Any]:
-    state = load_json(STATE_FILE, {})
+    state = load_json(STATE_FILE, {}, STATE_MAX_BYTES)
     if not isinstance(state, dict):
         state = {}
     state.setdefault("queue", [])
@@ -588,19 +739,28 @@ def state_data() -> dict[str, Any]:
 @contextlib.contextmanager
 def state_lock() -> Any:
     lock_path = STATE_FILE.with_name(STATE_FILE.name + ".lock")
-    ensure_private_dir(lock_path.parent)
-    with lock_path.open("a+", encoding="utf-8") as lock:
-        lock_path.chmod(0o600)
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with secure_parent_directory(lock_path, create=True) as (parent, filename):
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
         try:
-            yield
+            descriptor = os.open(filename, flags, 0o600, dir_fd=parent)
+        except OSError as error:
+            raise PlayerError("The player state lock could not be opened safely.", "local-security") from error
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) != 0o600:
+                raise PlayerError("The player state lock is unsafe.", "local-security")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            os.close(descriptor)
 
 
 def save_state_unlocked(state: dict[str, Any]) -> None:
     state["updated"] = int(time.time())
-    atomic_json(STATE_FILE, state)
+    atomic_json(STATE_FILE, state, maximum=STATE_MAX_BYTES)
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -824,7 +984,7 @@ def configure(args: argparse.Namespace) -> None:
     token = args.token or getpass.getpass("Plex access token: ") or previous.get("token", "")
     candidate = {"server": server.rstrip("/"), "token": token}
     choose_music_library(candidate, args.section, interactive=True)
-    atomic_json(CONFIG_FILE, candidate)
+    atomic_json(CONFIG_FILE, candidate, maximum=CONFIG_MAX_BYTES)
     print(f"Configured OmaPlex Music with library: {candidate['sectionTitle']}")
 
 
@@ -857,18 +1017,29 @@ def doctor() -> dict[str, Any]:
     warnings = []
     if not mpris:
         warnings.append("mpv-mpris is not installed; hardware media keys and desktop media controls are unavailable.")
-    if CONFIG_FILE.exists() and stat.S_IMODE(CONFIG_FILE.stat().st_mode) != 0o600:
+    config_info = secure_stat(CONFIG_FILE)
+    config_private = bool(config_info and stat.S_ISREG(config_info.st_mode)
+                          and config_info.st_uid == os.geteuid()
+                          and stat.S_IMODE(config_info.st_mode) == 0o600)
+    if config_info and not config_private:
         warnings.append("The Plex configuration file is not private; expected mode 0600.")
+    try:
+        with secure_parent_directory(CACHE_DIR / ".directory-check"):
+            cache_private = True
+    except FileNotFoundError:
+        cache_private = True
+    except PlayerError:
+        cache_private = False
     return {
         "ok": bool(health.get("ok")) and bool(shutil_which("mpv")),
         "configured": bool(config),
         "connection": health,
         "configFile": str(CONFIG_FILE),
-        "configPrivate": CONFIG_FILE.exists() and stat.S_IMODE(CONFIG_FILE.stat().st_mode) == 0o600,
+        "configPrivate": config_private,
         "mpv": shutil_which("mpv") or "",
         "mpris": mpris,
         "warnings": warnings,
-        "cache": {"path": str(CACHE_DIR), "private": not CACHE_DIR.exists() or stat.S_IMODE(CACHE_DIR.stat().st_mode) == 0o700},
+        "cache": {"path": str(CACHE_DIR), "private": cache_private},
     }
 
 

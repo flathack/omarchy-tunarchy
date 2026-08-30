@@ -39,7 +39,98 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             target = pathlib.Path(folder) / "broken.json"
             target.write_text("{", encoding="utf-8")
+            target.chmod(0o600)
             self.assertEqual(player.load_json(target, {"ok": False}), {"ok": False})
+
+    def test_atomic_json_rejects_symlinked_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            (root / "state").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(player.PlayerError, "opened safely"):
+                player.atomic_json(root / "state" / "config.json", {"ok": True})
+            self.assertFalse((outside / "config.json").exists())
+
+    def test_load_json_rejects_symlinked_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            target = outside / "config.json"
+            player.atomic_json(target, {"ok": True})
+            (root / "state").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(player.PlayerError, "opened safely"):
+                player.load_json(root / "state" / "config.json", {})
+
+    def test_private_storage_rejects_unsafe_permissions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            unsafe = root / "unsafe"
+            unsafe.mkdir(mode=0o777)
+            unsafe.chmod(0o777)
+            with self.assertRaisesRegex(player.PlayerError, "mode 0700"):
+                player.atomic_json(unsafe / "config.json", {"ok": True})
+            self.assertEqual(stat.S_IMODE(unsafe.stat().st_mode), 0o777)
+
+            exposed = root / "exposed.json"
+            exposed.write_text('{"ok": true}\n', encoding="utf-8")
+            exposed.chmod(0o644)
+            with self.assertRaisesRegex(player.PlayerError, "private regular file"):
+                player.load_json(exposed, {})
+
+    def test_local_storage_enforces_size_limits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = pathlib.Path(folder) / "data.json"
+            with self.assertRaisesRegex(player.PlayerError, "security policy"):
+                player.atomic_json(target, {"value": "x" * 200}, maximum=64)
+            player.atomic_bytes(target, b"x" * 65)
+            with self.assertRaisesRegex(player.PlayerError, "size limit"):
+                player.read_regular_file(target, maximum=64)
+
+    def test_atomic_write_stays_bound_to_opened_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            state = root / "state"
+            held = root / "held"
+            state.mkdir(mode=0o700)
+            target = state / "config.json"
+            real_open = player.secure_parent_directory
+
+            @contextlib.contextmanager
+            def replace_path(path, create=False):
+                with real_open(path, create=create) as opened:
+                    state.rename(held)
+                    state.mkdir(mode=0o700)
+                    yield opened
+
+            with mock.patch.object(player, "secure_parent_directory", replace_path):
+                player.atomic_json(target, {"destination": "held"})
+            self.assertEqual(player.load_json(held / "config.json", {}), {"destination": "held"})
+            self.assertFalse((state / "config.json").exists())
+
+    def test_private_read_stays_bound_to_opened_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            state = root / "state"
+            held = root / "held"
+            state.mkdir(mode=0o700)
+            player.atomic_json(state / "config.json", {"source": "held"})
+            real_open = player.secure_parent_directory
+
+            @contextlib.contextmanager
+            def replace_path(path, create=False):
+                with real_open(path, create=create) as opened:
+                    state.rename(held)
+                    state.mkdir(mode=0o700)
+                    replacement = state / "config.json"
+                    replacement.write_text('{"source": "replacement"}\n', encoding="utf-8")
+                    replacement.chmod(0o600)
+                    yield opened
+
+            with mock.patch.object(player, "secure_parent_directory", replace_path):
+                result = player.load_json(state / "config.json", {})
+            self.assertEqual(result, {"source": "held"})
 
     def test_atomic_json_supports_concurrent_writers(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -316,7 +407,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.3.0")
+        self.assertEqual(manifest["version"], "0.3.1")
         self.assertTrue((ROOT / "assets" / "omaplex.svg").is_file())
         self.assertTrue((ROOT / "preview.png").is_file())
 
