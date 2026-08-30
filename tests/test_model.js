@@ -48,3 +48,12 @@ test("transport actions queue while sliders coalesce to the newest intent", () =
   assert.equal(transport.length, 4);
   assert.deepEqual(Array.from(transport[3]), [helper, "control", "previous"]);
 });
+
+test("pending transport actions have a strict bound", () => {
+  const helper = "/plugin/bin/tunarchy";
+  let pending = [];
+  for (let index = 0; index < 20; index += 1)
+    pending = model.queueAction(pending, [helper, "control", index % 2 ? "next" : "previous"]);
+  assert.equal(pending.length, model.MAX_PENDING_ACTIONS);
+  assert.equal(pending.length, 8);
+});

@@ -24,7 +24,6 @@ Panel {
   property string errorText: ""
   property bool loading: false
   property int selectedIndex: 0
-  property string pendingDataMode: "recent"
   property int nextDataRequestId: 0
   property int requestedDataRequestId: 0
   property int activeDataRequestId: 0
@@ -37,6 +36,8 @@ Panel {
   property bool helpVisible: false
   property var pendingActions: []
   property var pendingQueueEdits: []
+  property var pendingArtwork: []
+  property string activeArtwork: ""
 
   readonly property var navigation: [
     { id: "recent", label: "Home", icon: "\uf015" },
@@ -74,7 +75,6 @@ Panel {
   readonly property var activeTrack: player && player.track ? player.track : null
   readonly property string activeThumb: activeTrack ? String(activeTrack.thumb || "") : ""
   readonly property bool configured: player && player.configured === true
-  readonly property string barText: Model.barLabel(player)
   readonly property bool demoMode: setting("demoMode", false) === true
   readonly property bool navigationShortcutsEnabled: opened && (configured || demoMode)
     && !helpVisible && !searchField.activeFocus && !seekFocus.activeFocus && !volumeFocus.activeFocus
@@ -144,7 +144,6 @@ Panel {
   function startData(requestId, mode, nextCommand) {
     if (requestId !== requestedDataRequestId || activeDataRequestId !== 0) return
     activeDataRequestId = requestId
-    pendingDataMode = mode
     dataProc.command = nextCommand
     dataProc.running = true
   }
@@ -152,7 +151,6 @@ Panel {
   function runData(mode, nextCommand) {
     nextDataRequestId += 1
     requestedDataRequestId = nextDataRequestId
-    pendingDataMode = mode
     loading = true
     errorText = ""
 
@@ -272,6 +270,7 @@ Panel {
     loading = false
     if (!parsed) { errorText = "Plex returned unreadable data."; return }
     items = Model.safeArray(parsed.items)
+    pendingArtwork = []
     if (parsed.stale === true) errorText = parsed.warning || "Showing cached library data while Plex is offline."
     selectedIndex = pendingSelectedIndex >= 0
       ? Math.max(0, Math.min(items.length - 1, pendingSelectedIndex)) : 0
@@ -331,7 +330,11 @@ Panel {
     var args = ["queue-action", action]
     if (index !== undefined) args.push("--index", String(index))
     if (destination !== undefined) args.push("--to", String(destination))
-    runData("queue", command(args))
+    if (queueEditProc.running) {
+      errorText = "A Queue update is already in progress. Try again in a moment."
+      return
+    }
+    runQueueEdit(command(args))
   }
 
   function playNext(item) {
@@ -342,11 +345,57 @@ Panel {
 
   function runQueueEdit(nextCommand) {
     if (queueEditProc.running) {
+      if (pendingQueueEdits.length >= 16) {
+        errorText = "Too many player actions are waiting."
+        return
+      }
       pendingQueueEdits = pendingQueueEdits.concat([nextCommand])
       return
     }
     queueEditProc.command = nextCommand
     queueEditProc.running = true
+  }
+
+  function requestArtwork(source) {
+    var value = String(source || "")
+    if (value === "" || value.indexOf("/") !== 0 || value.indexOf("//") === 0) return
+    if (activeArtwork === value || pendingArtwork.indexOf(value) >= 0) return
+    if (pendingArtwork.length >= 32) return
+    pendingArtwork = pendingArtwork.concat([value])
+    startNextArtwork()
+  }
+
+  function startNextArtwork() {
+    if (artProc.running || activeArtwork !== "" || pendingArtwork.length === 0) return
+    activeArtwork = pendingArtwork[0]
+    pendingArtwork = pendingArtwork.slice(1)
+    artProc.command = command(["art", activeArtwork])
+    artProc.running = true
+  }
+
+  function applyArtwork(source, raw) {
+    var parsed = parseJson(raw, null)
+    var thumb = parsed && parsed.thumb ? String(parsed.thumb) : ""
+    if (thumb === "") return
+    var changed = false
+    var nextItems = []
+    for (var index = 0; index < items.length; index++) {
+      var item = items[index]
+      if (String(item.artSource || "") === source) {
+        var updated = Object.assign({}, item)
+        updated.thumb = thumb
+        nextItems.push(updated)
+        changed = true
+      } else nextItems.push(item)
+    }
+    if (changed) items = nextItems
+  }
+
+  function advanceProgress() {
+    if (!player || player.playing !== true) return
+    var updated = Object.assign({}, player)
+    updated.position = Math.min(Number(updated.duration || 0), Number(updated.position || 0) + 1)
+    player = updated
   }
 
   function moveSelection(delta) {
@@ -431,7 +480,7 @@ Panel {
   Shortcut {
     sequence: "Ctrl+Space"
     context: Qt.ApplicationShortcut
-    enabled: root.opened && root.activeTrack !== null
+    enabled: root.opened && (root.activeTrack !== null || Number(root.player.queueLength || 0) > 0)
     onActivated: root.control("toggle")
   }
 
@@ -466,11 +515,23 @@ Panel {
     onExited: function(exitCode) {
       if (exitCode !== 0) root.errorText = root.errorMessage(queueEditError.text, "Could not update the queue.")
       root.refreshStatus()
+      if (root.view === "queue") root.runData("queue", root.command(["queue"]))
       if (root.pendingQueueEdits.length > 0) {
         var nextCommand = root.pendingQueueEdits[0]
         root.pendingQueueEdits = root.pendingQueueEdits.slice(1)
         Qt.callLater(function() { root.runQueueEdit(nextCommand) })
       }
+    }
+  }
+
+  Process {
+    id: artProc
+    stdout: StdioCollector { id: artOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      var source = root.activeArtwork
+      if (exitCode === 0) root.applyArtwork(source, artOutput.text)
+      root.activeArtwork = ""
+      Qt.callLater(root.startNextArtwork)
     }
   }
 
@@ -511,11 +572,18 @@ Panel {
   }
 
   Timer {
-    interval: root.opened ? 1000 : (root.player && root.player.playing ? 3000 : (root.activeTrack ? 10000 : 30000))
+    interval: root.opened ? 3000 : (root.player && root.player.playing ? 10000 : (root.activeTrack ? 15000 : 30000))
     running: true
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refreshStatus()
+  }
+
+  Timer {
+    interval: 1000
+    running: root.player && root.player.playing === true
+    repeat: true
+    onTriggered: root.advanceProgress()
   }
 
   Timer {
@@ -575,6 +643,8 @@ Panel {
           source: root.activeThumb
           fillMode: Image.PreserveAspectCrop
           asynchronous: true
+          sourceSize.width: Math.max(1, Math.round(width * 2))
+          sourceSize.height: Math.max(1, Math.round(height * 2))
           cache: true
           visible: root.activeThumb !== "" && status === Image.Ready
         }
@@ -637,6 +707,8 @@ Panel {
             source: root.activeTrack ? root.activeTrack.thumb || "" : ""
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
+            sourceSize.width: Math.max(1, Math.round(width * 2))
+            sourceSize.height: Math.max(1, Math.round(height * 2))
             visible: !root.helpVisible && status === Image.Ready
           }
 
@@ -1033,6 +1105,7 @@ Panel {
         foreground: root.foreground
         font.family: root.fontFamily
         text: root.query
+        maximumLength: 256
         onTextChanged: {
           root.query = text
           if (!root.suppressSearch) searchDebounce.restart()
@@ -1147,6 +1220,7 @@ Panel {
           foreground: root.foreground
           Accessible.role: Accessible.ListItem
           Accessible.name: (modelData.title || "Untitled") + ", " + Model.subtitle(modelData)
+          Component.onCompleted: root.requestArtwork(modelData.artSource)
 
           MouseArea {
             anchors.fill: parent
@@ -1168,7 +1242,14 @@ Panel {
               radius: Style.cornerRadius / 2
               color: Style.selectedFillFor(root.foreground, Color.accent)
               clip: true
-              Image { anchors.fill: parent; source: mediaRow.modelData.thumb || ""; fillMode: Image.PreserveAspectCrop; asynchronous: true }
+              Image {
+                anchors.fill: parent
+                source: mediaRow.modelData.thumb || ""
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                sourceSize.width: Math.max(1, Math.round(width * 2))
+                sourceSize.height: Math.max(1, Math.round(height * 2))
+              }
             }
             ColumnLayout {
               Layout.fillWidth: true

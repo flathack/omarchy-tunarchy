@@ -1,5 +1,7 @@
 .pragma library
 
+var MAX_PENDING_ACTIONS = 8
+
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, Number(value) || 0))
 }
@@ -61,9 +63,10 @@ function actionKind(command) {
 function queueAction(pending, nextCommand) {
   var queued = safeArray(pending)
   var kind = actionKind(nextCommand)
-  if (kind !== "seek" && kind !== "volume") return queued.concat([nextCommand])
+  if (kind !== "seek" && kind !== "volume")
+    return queued.concat([nextCommand]).slice(-MAX_PENDING_ACTIONS)
   var retained = []
   for (var index = 0; index < queued.length; index++)
     if (actionKind(queued[index]) !== kind) retained.push(queued[index])
-  return retained.concat([nextCommand])
+  return retained.concat([nextCommand]).slice(-MAX_PENDING_ACTIONS)
 }

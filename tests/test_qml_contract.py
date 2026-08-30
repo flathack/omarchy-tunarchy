@@ -90,12 +90,28 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("pendingActions = Model.queueAction(pendingActions, nextCommand)", QML)
         self.assertIn('kind !== "seek" && kind !== "volume"', MODEL)
         self.assertIn("root.pendingActions = root.pendingActions.slice(1)", QML)
+        self.assertIn("MAX_PENDING_ACTIONS = 8", MODEL)
+        self.assertIn("pendingQueueEdits.length >= 16", QML)
         self.assertNotIn("if (actionProc.running) return", QML)
 
     def test_status_polling_is_adaptive(self):
-        self.assertIn("root.opened ? 1000", QML)
-        self.assertIn("root.player && root.player.playing ? 3000", QML)
-        self.assertIn("root.activeTrack ? 10000 : 30000", QML)
+        self.assertIn("root.opened ? 3000", QML)
+        self.assertIn("root.player && root.player.playing ? 10000", QML)
+        self.assertIn("root.activeTrack ? 15000 : 30000", QML)
+        self.assertIn("root.advanceProgress()", QML)
+
+    def test_queue_mutations_are_not_sent_through_cancellable_data_process(self):
+        queue_function = QML[QML.index("function runQueueAction"):QML.index("function playNext")]
+        self.assertIn("runQueueEdit(command(args))", queue_function)
+        self.assertNotIn("runData(", queue_function)
+        self.assertIn('if (root.view === "queue") root.runData', QML)
+
+    def test_artwork_is_lazy_bounded_and_decode_limited(self):
+        self.assertIn('command(["art", activeArtwork])', QML)
+        self.assertIn("pendingArtwork.indexOf(value)", QML)
+        self.assertIn("pendingArtwork.length >= 32", QML)
+        self.assertGreaterEqual(QML.count("sourceSize.width:"), 3)
+        self.assertIn("maximumLength: 256", QML)
 
     def test_complete_keyboard_navigation_contract(self):
         self.assertGreaterEqual(QML.count("focusable: true"), 15)

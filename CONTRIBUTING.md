@@ -8,6 +8,7 @@ Run the checks before opening a pull request:
 
 ```bash
 python3 -m unittest discover -s tests -v
+node --test tests/test_model.js
 omarchy plugin validate .
 ```
 

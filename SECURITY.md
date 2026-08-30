@@ -18,7 +18,9 @@ The PIN login exchanges its one-time code directly with `plex.tv`. The resulting
 token is sent only to Plex, the configured Plex server, and the local mpv process.
 Tunarchy passes it to mpv as a file-local HTTP header over a user-owned Unix
 socket; it is not included in process arguments, playback URLs, or MPRIS metadata,
-and unrelated URLs opened in mpv do not inherit it. Cover art and
+and unrelated URLs opened in mpv do not inherit it. API, timeline, and cover-art
+requests also use headers instead of credential-bearing URLs and reject redirects
+to a different origin. Cover art and
 last-good library payloads are stored in
 `${XDG_CACHE_HOME:-~/.cache}/tunarchy`, whose size and age are
 bounded automatically. Demo mode does not read credentials or contact Plex.

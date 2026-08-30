@@ -18,6 +18,8 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HELPER = ROOT / "bin" / "tunarchy"
+FAKE_PNG = (b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", 16, 16)
+            + b"\x00\x00\x00\x00IEND\xaeB\x60\x82")
 
 
 def load_player():
@@ -208,43 +210,30 @@ class StorageTests(unittest.TestCase):
                 return False
 
             def read(self, _):
-                return b"new!"
+                return FAKE_PNG
 
         with tempfile.TemporaryDirectory() as folder, \
              mock.patch.object(player, "CACHE_DIR", pathlib.Path(folder)), \
              mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
              mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"), \
-             mock.patch.object(player, "CACHE_MAX_BYTES", 5), \
+             mock.patch.object(player, "CACHE_MAX_BYTES", len(FAKE_PNG) + 1), \
              mock.patch.object(player, "safe_urlopen", return_value=Response()):
             player.ensure_private_dir(player.ART_CACHE_DIR)
             (player.ART_CACHE_DIR / "old.jpg").write_bytes(b"old!")
             player.art_path({"server": "http://plex", "token": "tok"}, "/thumb/1")
             total = sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir())
-        self.assertLessEqual(total, 5)
+        self.assertLessEqual(total, len(FAKE_PNG) + 1)
 
-    def test_concurrent_art_downloads_stay_within_cache_budget(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_):
-                return False
-
-            def read(self, _):
-                return b"cover"
-
+    def test_library_artwork_is_loaded_lazily(self):
         config = {"server": "http://plex", "token": "tok"}
-        with tempfile.TemporaryDirectory() as folder, \
-             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
-             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"), \
-             mock.patch.object(player, "CACHE_MAX_BYTES", 10), \
-             mock.patch.object(player.urllib.request, "urlopen", side_effect=lambda *_args, **_kwargs: Response()):
-            player.compact_items(config, [
+        with mock.patch.object(player, "art_path") as art:
+            items = player.compact_items(config, [
                 {"ratingKey": str(index), "type": "album", "thumb": f"/cover/{index}"}
                 for index in range(20)
             ])
-            total = sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir() if not path.name.startswith("."))
-        self.assertLessEqual(total, 10)
+        art.assert_not_called()
+        self.assertEqual(items[7]["artSource"], "/cover/7")
+        self.assertEqual(items[7]["thumb"], "")
 
 
 class PlexModelTests(unittest.TestCase):
@@ -371,6 +360,13 @@ class PlexModelTests(unittest.TestCase):
             result = player.search(self.config, "test", 10)
         self.assertEqual(result, [{"type": "track", "ratingKey": "1"}])
 
+    def test_search_rejects_oversized_query_before_network(self):
+        with mock.patch.object(player, "plex_request") as request:
+            with self.assertRaisesRegex(player.PlayerError, "limited") as raised:
+                player.search(self.config, "x" * (player.SEARCH_QUERY_MAX_CHARS + 1), 10)
+        self.assertEqual(raised.exception.code, "invalid-query")
+        request.assert_not_called()
+
     def test_compact_track(self):
         row = {
             "ratingKey": "99", "type": "track", "title": "Song",
@@ -439,6 +435,39 @@ class PlexModelTests(unittest.TestCase):
             result = player.mpv_commands([["get_property", "pause"], ["get_property", "volume"]])
         self.assertEqual(result, [False, 42])
         socket_factory.assert_called_once()
+
+    def test_mpv_batch_ignores_unsolicited_events(self):
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.recv.return_value = (b'{"event":"property-change","name":"pause","data":false}\n'
+                                    b'{"request_id":1,"error":"success","data":42}\n')
+        with mock.patch.object(player.socket, "socket", return_value=client):
+            self.assertEqual(player.mpv_commands([["get_property", "volume"]]), [42])
+
+    def test_load_streams_batches_playlist_on_one_ipc_call(self):
+        with mock.patch.object(player, "mpv_commands") as commands:
+            player.load_streams({"token": "secret"}, [f"http://plex/{index}" for index in range(500)])
+        commands.assert_called_once()
+        self.assertEqual(len(commands.call_args.args[0]), 500)
+
+    def test_transient_ipc_failure_does_not_unlink_live_socket(self):
+        details = mock.Mock(st_mode=stat.S_IFSOCK | 0o600, st_uid=os.geteuid())
+        with mock.patch.object(player, "secure_stat", return_value=details), \
+             mock.patch.object(player, "mpv_commands", side_effect=TimeoutError("slow")), \
+             mock.patch.object(player, "secure_unlink") as unlink:
+            self.assertIsNone(player.mpv_properties(["pause"]))
+        unlink.assert_not_called()
+
+    def test_connection_refused_socket_is_recovered_before_start(self):
+        details = mock.Mock(st_mode=stat.S_IFSOCK | 0o600, st_uid=os.geteuid())
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.connect.side_effect = ConnectionRefusedError()
+        with mock.patch.object(player, "secure_stat", return_value=details), \
+             mock.patch.object(player.socket, "socket", return_value=client), \
+             mock.patch.object(player, "secure_unlink") as unlink:
+            player.recover_stale_mpv_socket()
+        unlink.assert_called_once_with(player.SOCKET_FILE)
 
     def test_plex_request_rejects_oversized_json(self):
         class Response:
@@ -555,11 +584,34 @@ class PlexModelTests(unittest.TestCase):
         second = {"server": "http://plex-b:32400", "token": "second", "section": "4"}
         with tempfile.TemporaryDirectory() as folder, \
              mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
-             mock.patch.object(player.urllib.request, "urlopen", side_effect=[Response(b"first"), Response(b"second")]) as request:
+             mock.patch.object(player, "safe_urlopen",
+                               side_effect=[Response(FAKE_PNG), Response(FAKE_PNG)]) as request:
             first_uri = player.art_path(first, "/library/metadata/1/thumb/2")
             second_uri = player.art_path(second, "/library/metadata/1/thumb/2")
         self.assertNotEqual(first_uri, second_uri)
         self.assertEqual(request.call_count, 2)
+
+    def test_art_request_keeps_token_out_of_url_and_in_header(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = FAKE_PNG
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
+             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"), \
+             mock.patch.object(player, "safe_urlopen", return_value=response) as urlopen:
+            player.art_path(self.config, "/thumb/1")
+        request = urlopen.call_args.args[0]
+        self.assertNotIn("tok", request.full_url)
+        self.assertEqual(request.get_header("X-plex-token"), "tok")
+
+    def test_invalid_artwork_is_not_cached(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b"not an image"
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
+             mock.patch.object(player, "safe_urlopen", return_value=response):
+            self.assertEqual(player.art_path(self.config, "/thumb/invalid"), "")
 
 
 class AuthenticationTests(unittest.TestCase):
@@ -602,6 +654,33 @@ class AuthenticationTests(unittest.TestCase):
             self.assertFalse(player.STATE_FILE.exists())
             self.assertNotIn("token", player.load_json(player.CONFIG_FILE, {}))
 
+    def test_logout_clears_credentials_when_shutdown_fails(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"), \
+             mock.patch.object(player, "STATE_FILE", pathlib.Path(folder) / "state.json"), \
+             mock.patch.object(player, "shutdown_player", side_effect=player.PlayerError("wedged", "player-shutdown")):
+            player.atomic_json(player.CONFIG_FILE, {"server": "https://plex", "token": "secret",
+                                                    "clientIdentifier": "client"})
+            player.atomic_json(player.STATE_FILE, {"queue": [{"title": "Private"}]})
+            result = player.logout()
+            self.assertNotIn("token", player.load_json(player.CONFIG_FILE, {}))
+            self.assertFalse(player.STATE_FILE.exists())
+        self.assertFalse(result["stopped"])
+        self.assertEqual(result["code"], "player-shutdown")
+
+    def test_login_polling_uses_remaining_deadline(self):
+        responses = [{"id": 42, "code": "pin"}, {"authToken": None}]
+        clock = iter((100.0, 100.0, 100.0, 100.5, 101.0))
+        with mock.patch.object(player, "PLEX_LOGIN_TIMEOUT_SECONDS", 1), \
+             mock.patch.object(player, "plex_cloud_request", side_effect=responses) as request, \
+             mock.patch.object(player.time, "monotonic", side_effect=lambda: next(clock)), \
+             mock.patch.object(player.time, "sleep"), \
+             mock.patch.object(player.subprocess, "Popen"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(player.PlayerError, "timed out"):
+                player.login("http://plex:32400")
+        self.assertLessEqual(request.call_args.kwargs["timeout"], 1)
+
     def test_configure_parser_rejects_plaintext_token_argument(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             player.parser().parse_args(["configure", "--token", "secret"])
@@ -629,13 +708,15 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "start_mpv"), \
              mock.patch.object(player, "mpv_running", return_value=False), \
              mock.patch.object(player, "raw_track") as raw, \
+             mock.patch.object(player, "mpv_commands") as batch, \
              mock.patch.object(player, "mpv_command") as command, \
              mock.patch.object(player, "status", return_value={"playing": True}):
             result = player.play({"server": "http://plex", "token": "tok"}, "2", "album")
         raw.assert_not_called()
-        self.assertIn("/part/2", command.call_args_list[0].args[0][1])
-        self.assertEqual(command.call_args_list[0].args[0][2], "replace")
-        self.assertEqual(command.call_args_list[1].args[0][2], "append")
+        loads = batch.call_args.args[0]
+        self.assertIn("/part/2", loads[0][1])
+        self.assertEqual(loads[0][2], "replace")
+        self.assertEqual(loads[1][2], "append")
         self.assertIn(mock.call(["set_property", "pause", False], True), command.call_args_list)
         self.assertIn(mock.call(["set_property", "playlist-pos", 0], True), command.call_args_list)
         self.assertEqual([item["key"] for item in player.state_data()["queue"]], ["2", "1"])
@@ -691,15 +772,16 @@ class PlayerTests(unittest.TestCase):
             "queueNamespace": player.cache_namespace(config),
         })
         with mock.patch.object(player, "load_config", return_value=config), \
-             mock.patch.object(player, "mpv_running", return_value=False), \
+             mock.patch.object(player, "mpv_properties", return_value=None), \
              mock.patch.object(player, "start_mpv"), \
+             mock.patch.object(player, "mpv_commands") as batch, \
              mock.patch.object(player, "mpv_command") as command, \
              mock.patch.object(player, "status", return_value={"playing": True}), \
              mock.patch.object(player.time, "sleep"):
             result = player.control("toggle")
-        load = next(call for call in command.call_args_list if call.args[0][0] == "loadfile")
-        self.assertEqual(load.args[0][1], "http://plex/part/1")
-        self.assertTrue(load.args[1])
+        load = batch.call_args.args[0][0]
+        self.assertEqual(load[1], "http://plex/part/1")
+        self.assertEqual(load[2], "replace")
         self.assertIn(mock.call(["set_property", "loop-playlist", "inf"], True), command.call_args_list)
         self.assertTrue(result["playing"])
 
@@ -713,6 +795,17 @@ class PlayerTests(unittest.TestCase):
         start.assert_not_called()
         status.assert_called_once()
         self.assertFalse(result["playing"])
+
+    def test_toggle_resumes_queue_when_existing_mpv_is_idle(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        with mock.patch.object(player, "load_config", return_value=config), \
+             mock.patch.object(player, "mpv_properties", return_value={"idle-active": True}), \
+             mock.patch.object(player, "resume_queue", return_value={"playing": True}) as resume, \
+             mock.patch.object(player, "mpv_command") as command:
+            result = player.control("toggle")
+        resume.assert_called_once_with(config)
+        command.assert_not_called()
+        self.assertTrue(result["playing"])
 
     def test_stopped_queue_selection_starts_selected_item(self):
         config = {"server": "http://plex", "token": "tok", "section": "4"}
@@ -775,6 +868,25 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "mpv_properties", return_value=None):
             self.assertEqual(player.queue_view()["items"], [])
 
+    def test_art_hydration_does_not_cross_account_namespace(self):
+        old = {"server": "http://plex", "token": "old", "section": "4"}
+        new = {"server": "http://plex", "token": "new", "section": "4"}
+        old_item = {"key": "1", "title": "Old", "_streamHash": "same", "_artSource": "/old"}
+        new_item = {"key": "1", "title": "New", "_streamHash": "same", "_artSource": "/new"}
+
+        def switch_account(*_):
+            player.atomic_json(player.STATE_FILE, {
+                "queue": [new_item], "queueNamespace": player.cache_namespace(new)
+            })
+            return "file:///old.jpg"
+
+        player.atomic_json(player.STATE_FILE, {
+            "queue": [old_item], "queueNamespace": player.cache_namespace(old)
+        })
+        with mock.patch.object(player, "art_path", side_effect=switch_account):
+            player.hydrate_active_art(old, old_item)
+        self.assertEqual(player.state_data()["queue"], [new_item])
+
     def test_duplicate_queue_entries_are_reconciled_by_occurrence(self):
         digest = player.hashlib.sha256(b"http://plex/repeat").hexdigest()
         first = {"key": "first", "_streamHash": digest}
@@ -801,12 +913,32 @@ class PlayerTests(unittest.TestCase):
         queue, url = player.finish_prepared_item(config, {"key": "new", "title": "New"}, "/part/new")
         with mock.patch.object(player, "mpv_running", return_value=False), \
              mock.patch.object(player, "start_mpv"), \
-             mock.patch.object(player, "load_stream", side_effect=player.PlayerError("rejected", "player-ipc")), \
+             mock.patch.object(player, "load_streams", side_effect=player.PlayerError("rejected", "player-ipc")), \
              mock.patch.object(player, "mpv_command") as command:
             with self.assertRaisesRegex(player.PlayerError, "rejected"):
                 player.activate_queue(config, [queue], [url], False)
         self.assertEqual(player.state_data()["queue"], old["queue"])
         command.assert_called_once_with(["quit"])
+
+    def test_resume_rejects_state_changed_during_preparation(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        original = {"queue": [{"key": "1", "_part": "/1"}],
+                    "queueNamespace": player.cache_namespace(config)}
+        player.atomic_json(player.STATE_FILE, original)
+
+        def mutate(_config, stored):
+            player.atomic_json(player.STATE_FILE, {
+                "queue": [{"key": "2", "_part": "/2"}],
+                "queueNamespace": player.cache_namespace(config),
+            })
+            return stored, ["http://plex/1"]
+
+        with mock.patch.object(player, "prepare_saved_queue", side_effect=mutate), \
+             mock.patch.object(player, "start_mpv") as start:
+            with self.assertRaisesRegex(player.PlayerError, "queue changed") as raised:
+                player.resume_queue(config)
+        self.assertEqual(raised.exception.code, "queue-changed")
+        start.assert_not_called()
 
     def test_oversized_state_is_rejected_before_player_mutation(self):
         config = {"server": "http://plex", "token": "tok"}
@@ -838,9 +970,23 @@ class PlayerTests(unittest.TestCase):
         command.assert_not_called()
         self.assertTrue(result["stopped"])
 
+    def test_start_timeout_terminates_spawned_mpv(self):
+        process = mock.MagicMock()
+        process.poll.return_value = 0
+        with mock.patch.object(player, "mpv_running", return_value=False), \
+             mock.patch.object(player, "recover_stale_mpv_socket"), \
+             mock.patch.object(player, "shutil_which", return_value="/usr/bin/mpv"), \
+             mock.patch.object(player, "ensure_private_dir"), \
+             mock.patch.object(player.subprocess, "Popen", return_value=process), \
+             mock.patch.object(player.time, "sleep"):
+            with self.assertRaisesRegex(player.PlayerError, "did not start"):
+                player.start_mpv()
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=0.5)
+
     def test_control_clamps_volume(self):
         with mock.patch.object(player, "load_config", return_value={}), \
-             mock.patch.object(player, "mpv_running", return_value=True), \
+             mock.patch.object(player, "mpv_properties", return_value={"idle-active": False}), \
              mock.patch.object(player, "mpv_command") as command, \
              mock.patch.object(player, "status", return_value={"volume": 130}):
             result = player.control("volume", 999)
@@ -859,7 +1005,7 @@ class PlayerTests(unittest.TestCase):
         state = {"queue": [], "repeat": "off", "shuffle": False}
         player.atomic_json(player.STATE_FILE, state)
         with mock.patch.object(player, "load_config", return_value={}), \
-             mock.patch.object(player, "mpv_running", return_value=True), \
+             mock.patch.object(player, "mpv_properties", return_value={"idle-active": False}), \
              mock.patch.object(player, "player_snapshot", return_value={"running": True, "urls": []}), \
              mock.patch.object(player, "mpv_command") as command, \
              mock.patch.object(player, "status", return_value={"repeat": "all"}):
@@ -877,10 +1023,10 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "load_config", return_value=config), \
              mock.patch.object(player, "property_or", return_value=0), \
              mock.patch.object(player, "player_snapshot", return_value={"running": True, "urls": []}), \
-             mock.patch.object(player, "mpv_command") as command, \
+             mock.patch.object(player, "mpv_commands") as commands, \
              mock.patch.object(player, "queue_view", return_value={"items": [{"key": "1"}]}):
             result = player.queue_action("remove", index=1)
-        command.assert_called_once_with(["playlist-remove", 1], True)
+        commands.assert_called_once_with([["playlist-remove", 1]])
         self.assertEqual(player.state_data()["queue"], [{"key": "1"}])
         self.assertEqual(len(result["items"]), 1)
 
@@ -893,7 +1039,7 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "load_config", return_value=config), \
              mock.patch.object(player, "property_or", return_value=0), \
              mock.patch.object(player, "player_snapshot", return_value={"running": True, "urls": []}), \
-             mock.patch.object(player, "mpv_command", side_effect=player.PlayerError("rejected", "player-ipc")), \
+             mock.patch.object(player, "mpv_commands", side_effect=player.PlayerError("rejected", "player-ipc")), \
              mock.patch.object(player, "restore_player") as restore:
             with self.assertRaisesRegex(player.PlayerError, "rejected"):
                 player.queue_action("remove", index=1)

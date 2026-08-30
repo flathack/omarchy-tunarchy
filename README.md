@@ -19,7 +19,7 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 - MPRIS integration for hardware media keys and desktop media controls
 - Plex Dashboard integration with live play, pause, progress, track, and stop updates
 - Actionable offline, authentication, DNS, library, and server error states
-- Concurrent artwork loading, bounded private cache, and offline last-good data
+- Lazy on-demand artwork loading, bounded private cache, and offline last-good data
 - Native Omarchy/Quickshell styling with top, bottom, and vertical bar support
 - Keyboard and mouse navigation
 - Credential-free demo mode with fictional music
@@ -87,6 +87,7 @@ ${XDG_CONFIG_HOME:-~/.config}/tunarchy/config.json
 - Middle-click it to play or pause.
 - Scroll over it to move to the previous or next track.
 - Type in the panel to search Plex.
+- Search terms are limited to 256 characters to keep helper and server requests bounded.
 - Use the navigation rail to browse artists, albums, playlists, history,
   favorites, and the active queue.
 - Click a collection to open it, or use its inline play/shuffle actions.
@@ -160,6 +161,7 @@ Run the tests and the same manifest validation used during installation:
 
 ```bash
 python3 -m unittest discover -s tests -v
+node --test tests/test_model.js
 omarchy plugin validate .
 ```
 
