@@ -58,10 +58,8 @@ Panel {
 
   readonly property url helperUrl: Qt.resolvedUrl("bin/tunarchy")
   readonly property url tunaBrandUrl: Qt.resolvedUrl("assets/tuna-brand.png")
-  readonly property url tuna18Url: Qt.resolvedUrl("assets/tuna-ui-18.png")
   readonly property url tuna24Url: Qt.resolvedUrl("assets/tuna-ui-24.png")
   readonly property url tuna64Url: Qt.resolvedUrl("assets/tuna-ui-64.png")
-  readonly property rect tuna18Clip: Qt.rect(520, 325, 500, 360)
   readonly property rect tuna24Clip: Qt.rect(350, 250, 850, 525)
   readonly property rect tuna64Clip: Qt.rect(60, 35, 1440, 900)
   readonly property string helperPath: decodeURIComponent(String(helperUrl).replace(/^file:\/\//, ""))
@@ -832,24 +830,11 @@ Panel {
           PanelActionButton {
             id: playButton
             size: Style.space(34)
-            iconText: ""
+            iconText: root.player && root.player.playing ? "\uf04c" : "\uf04b"
             tooltipText: root.player && root.player.playing ? "Pause" : "Play"
             foreground: root.foreground; fontFamily: root.fontFamily; bordered: true; focusable: true
             Accessible.name: tooltipText
             onClicked: root.control("toggle")
-
-            Image {
-              id: playButtonTuna
-              anchors.centerIn: parent
-              width: Style.space(27)
-              height: width
-              source: root.tuna18Url
-              sourceClipRect: root.tuna18Clip
-              fillMode: Image.PreserveAspectFit
-              smooth: false
-              mipmap: false
-              opacity: root.player && root.player.playing ? 1 : 0.82
-            }
           }
           PanelActionButton {
             iconText: "\uf051"; tooltipText: "Next"; foreground: root.foreground; fontFamily: root.fontFamily
