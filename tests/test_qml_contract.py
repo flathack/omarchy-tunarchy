@@ -14,15 +14,26 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("WidgetButton {", QML)
 
     def test_helper_uses_argument_array(self):
-        self.assertIn('[helperPath, "search", value', QML)
+        self.assertIn('command(["search", value', QML)
         self.assertNotIn("X-Plex-Token", QML)
 
     def test_setup_uses_shell_quoting(self):
         self.assertIn("Util.shellQuote(helperPath)", QML)
 
     def test_player_controls_are_present(self):
-        for action in ('control("toggle")', 'control("previous")', 'control("next")', 'control("seek"'):
+        for action in ('control("toggle")', 'control("previous")', 'control("next")', 'control("seek"',
+                       'control("volume"', 'control("shuffle")', 'control("repeat")'):
             self.assertIn(action, QML)
+
+    def test_library_and_queue_navigation_are_present(self):
+        for view in ('"artists"', '"albums"', '"playlists"', '"history"', '"frequent"', '"favorites"', '"queue"'):
+            self.assertIn(view, QML)
+        self.assertIn('runQueueAction("remove"', QML)
+        self.assertIn('"play-next"', QML)
+
+    def test_plex_login_and_demo_mode_are_present(self):
+        self.assertIn('" login"', QML)
+        self.assertIn('setting("demoMode", false)', QML)
 
 
 if __name__ == "__main__":

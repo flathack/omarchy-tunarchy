@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "flathack.omaplex-music",
   "name": "OmaPlex Music",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "flathack",
   "license": "MIT",
   "description": "Browse and play a Plex music library from the Omarchy bar.",
@@ -19,7 +19,9 @@
     "allowMultiple": false,
     "defaultSection": "center",
     "defaults": {
-      "recentAlbumCount": 20
+      "recentAlbumCount": 20,
+      "libraryItemCount": 100,
+      "demoMode": false
     },
     "schema": [
       {
@@ -31,6 +33,23 @@
         "step": 5,
         "defaultValue": 20,
         "description": "Number of recently added albums shown in the panel."
+      },
+      {
+        "key": "libraryItemCount",
+        "type": "integer",
+        "label": "Library items per view",
+        "min": 25,
+        "max": 250,
+        "step": 25,
+        "defaultValue": 100,
+        "description": "Maximum artists, albums, playlists, or tracks loaded in one view."
+      },
+      {
+        "key": "demoMode",
+        "type": "boolean",
+        "label": "Demo mode",
+        "defaultValue": false,
+        "description": "Show fictional music and never contact Plex or start mpv."
       }
     ]
   }

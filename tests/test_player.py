@@ -1,5 +1,7 @@
 import importlib.machinery
 import importlib.util
+import contextlib
+import io
 import json
 import pathlib
 import stat
@@ -37,6 +39,26 @@ class StorageTests(unittest.TestCase):
             target = pathlib.Path(folder) / "broken.json"
             target.write_text("{", encoding="utf-8")
             self.assertEqual(player.load_json(target, {"ok": False}), {"ok": False})
+
+    def test_client_identifier_is_generated_once(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"):
+            first = player.client_identifier()
+            second = player.client_identifier()
+            self.assertEqual(first, second)
+            self.assertGreater(len(first), 20)
+
+    def test_cache_cleanup_enforces_size_limit(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CACHE_DIR", pathlib.Path(folder)), \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
+             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"):
+            player.ensure_private_dir(player.ART_CACHE_DIR)
+            for index in range(3):
+                (player.ART_CACHE_DIR / f"{index}.jpg").write_bytes(b"x" * 20)
+            result = player.cleanup_cache(max_age_days=30, max_bytes=25)
+            self.assertGreaterEqual(result["removed"], 2)
+            self.assertLessEqual(sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir()), 25)
 
 
 class PlexModelTests(unittest.TestCase):
@@ -82,6 +104,65 @@ class PlexModelTests(unittest.TestCase):
         url = player.stream_url({"server": "http://plex", "token": "a b&c"}, "/library/parts/7/file.flac")
         self.assertEqual(url, "http://plex/library/parts/7/file.flac?X-Plex-Token=a+b%26c")
 
+    def test_library_list_applies_client_side_limit(self):
+        payload = {"MediaContainer": {"Metadata": [
+            {"ratingKey": str(index), "type": "album", "title": f"Album {index}"} for index in range(20)
+        ]}}
+        with mock.patch.object(player, "music_section", return_value="4"), \
+             mock.patch.object(player, "plex_request", return_value=payload), \
+             mock.patch.object(player, "compact_items", side_effect=lambda config, rows: rows):
+            result = player.library_list(self.config, "albums", 5)
+        self.assertEqual(len(result), 5)
+
+    def test_favorites_filters_unrated_tracks_client_side(self):
+        payload = {"MediaContainer": {"Metadata": [
+            {"ratingKey": "1", "type": "track", "title": "Unrated"},
+            {"ratingKey": "2", "type": "track", "title": "Favorite", "userRating": 10},
+        ]}}
+        with mock.patch.object(player, "music_section", return_value="4"), \
+             mock.patch.object(player, "plex_request", return_value=payload), \
+             mock.patch.object(player, "compact_items", side_effect=lambda config, rows: rows):
+            result = player.library_list(self.config, "favorites", 5)
+        self.assertEqual([row["title"] for row in result], ["Favorite"])
+
+    def test_cached_items_uses_last_good_data_for_network_failure(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder)):
+            target = player.data_cache_path("albums")
+            player.atomic_json(target, {"items": [{"title": "Cached"}], "cachedAt": 1})
+            result = player.cached_items("albums", lambda: (_ for _ in ()).throw(player.PlayerError("offline", "unreachable")))
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["items"][0]["title"], "Cached")
+
+
+class AuthenticationTests(unittest.TestCase):
+    def test_login_uses_pin_flow_and_saves_token_privately(self):
+        responses = [
+            {"id": 42, "code": "pin-code"},
+            {"authToken": None},
+            {"authToken": "access-token"},
+        ]
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"), \
+             mock.patch.object(player, "plex_cloud_request", side_effect=responses), \
+             mock.patch.object(player, "choose_music_library", side_effect=lambda candidate, *args, **kwargs: candidate.update({"section": "4", "sectionTitle": "Music"}) or candidate), \
+             mock.patch.object(player.subprocess, "Popen"), \
+             mock.patch.object(player.time, "sleep"):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = player.login("http://plex:32400")
+            saved = player.load_json(player.CONFIG_FILE, {})
+            mode = stat.S_IMODE(player.CONFIG_FILE.stat().st_mode)
+        self.assertTrue(result["connected"])
+        self.assertEqual(saved["token"], "access-token")
+        self.assertEqual(mode, 0o600)
+
+    def test_connection_health_preserves_transient_error_code(self):
+        with mock.patch.object(player, "load_config", return_value={"server": "http://plex", "token": "x"}), \
+             mock.patch.object(player, "sections", side_effect=player.PlayerError("offline", "timeout")):
+            result = player.connection_health()
+        self.assertEqual(result["code"], "timeout")
+        self.assertFalse(result["ok"])
+
 
 class PlayerTests(unittest.TestCase):
     def test_play_replaces_old_queue_then_appends_album(self):
@@ -122,6 +203,37 @@ class PlayerTests(unittest.TestCase):
         self.assertFalse(result["configured"])
         self.assertFalse(result["playing"])
 
+    def test_repeat_cycles_off_all_one(self):
+        state = {"queue": [], "repeat": "off", "shuffle": False}
+        with mock.patch.object(player, "load_config", return_value={}), \
+             mock.patch.object(player, "mpv_running", return_value=True), \
+             mock.patch.object(player, "state_data", return_value=state), \
+             mock.patch.object(player, "save_state"), \
+             mock.patch.object(player, "mpv_command") as command, \
+             mock.patch.object(player, "status", return_value={"repeat": "all"}):
+            result = player.control("repeat")
+        self.assertEqual(state["repeat"], "all")
+        self.assertIn(mock.call(["set_property", "loop-playlist", "inf"]), command.call_args_list)
+        self.assertEqual(result["repeat"], "all")
+
+    def test_queue_remove_updates_mpv_and_state(self):
+        state = {"queue": [{"key": "1"}, {"key": "2"}], "repeat": "off", "shuffle": False}
+        with mock.patch.object(player, "state_data", return_value=state), \
+             mock.patch.object(player, "mpv_running", return_value=True), \
+             mock.patch.object(player, "property_or", return_value=0), \
+             mock.patch.object(player, "mpv_command") as command, \
+             mock.patch.object(player, "save_state"), \
+             mock.patch.object(player, "queue_view", return_value={"items": [{"key": "1"}]}):
+            result = player.queue_action("remove", index=1)
+        command.assert_called_once_with(["playlist-remove", 1])
+        self.assertEqual(state["queue"], [{"key": "1"}])
+        self.assertEqual(len(result["items"]), 1)
+
+    def test_demo_never_requires_plex(self):
+        result = player.demo_dispatch(mock.Mock(command="library", view="artists"))
+        self.assertTrue(result["demo"])
+        self.assertEqual({item["type"] for item in result["items"]}, {"artist"})
+
 
 class RepositoryContractTests(unittest.TestCase):
     def test_manifest_and_entry_point(self):
@@ -130,6 +242,14 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
+        self.assertEqual(manifest["version"], "0.2.0")
+        self.assertTrue((ROOT / "assets" / "omaplex.svg").is_file())
+        self.assertTrue((ROOT / "preview.png").is_file())
+
+    def test_mpris_client_name_is_a_valid_bus_component(self):
+        helper = (ROOT / "bin" / "omarchy-omaplex-music").read_text(encoding="utf-8")
+        self.assertIn('"--audio-client-name=OmaPlex-Music"', helper)
+        self.assertNotIn('"--audio-client-name=OmaPlex Music"', helper)
 
     def test_no_credentials_are_tracked(self):
         forbidden = b"X-Plex" + b"-Token=" + b"real"
