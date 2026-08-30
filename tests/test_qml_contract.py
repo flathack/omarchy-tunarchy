@@ -48,6 +48,14 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('event.key === Qt.Key_Left && text === ""', QML)
         self.assertIn('event.key === Qt.Key_Right && text === ""', QML)
 
+    def test_keyboard_help_is_available_from_button_and_f1(self):
+        self.assertIn("property bool helpVisible: false", QML)
+        self.assertIn("readonly property var keyboardHelp", QML)
+        self.assertIn('id: helpButton', QML)
+        self.assertIn('iconText: "?"', QML)
+        self.assertIn('sequence: "F1"', QML)
+        self.assertIn('text: root.helpVisible ? "Keyboard map"', QML)
+
     def test_plex_login_and_demo_mode_are_present(self):
         self.assertIn('" login"', QML)
         self.assertIn('setting("demoMode", false)', QML)

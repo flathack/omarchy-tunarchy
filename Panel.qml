@@ -28,6 +28,7 @@ Panel {
   property bool volumeDragging: false
   property bool suppressSearch: false
   property int pendingSelectedIndex: -1
+  property bool helpVisible: false
 
   readonly property var navigation: [
     { id: "recent", label: "Home", icon: "\uf015" },
@@ -38,6 +39,21 @@ Panel {
     { id: "frequent", label: "Top", icon: "\uf201" },
     { id: "favorites", label: "Favs", icon: "\uf004" },
     { id: "queue", label: "Queue", icon: "\uf03b" }
+  ]
+
+  readonly property var keyboardHelp: [
+    { keys: "← / →", action: "Switch library tabs" },
+    { keys: "↑ / ↓", action: "Select a list item" },
+    { keys: "Enter", action: "Open or play" },
+    { keys: "Tab / Shift+Tab", action: "Move keyboard focus" },
+    { keys: "Ctrl+Enter", action: "Play a collection" },
+    { keys: "Shift+Enter", action: "Shuffle or play next" },
+    { keys: "Ctrl+↑ / ↓", action: "Move a Queue item" },
+    { keys: "Delete", action: "Remove a Queue item" },
+    { keys: "Ctrl+Space", action: "Play or pause" },
+    { keys: "Home / End", action: "Set a slider to its limit" },
+    { keys: "Esc", action: "Clear, go back, or close" },
+    { keys: "F1", action: "Toggle this help" }
   ]
 
   readonly property url helperUrl: Qt.resolvedUrl("bin/omarchy-omaplex-music")
@@ -59,6 +75,7 @@ Panel {
   }
 
   function open() {
+    helpVisible = false
     controller.show()
     refreshStatus()
     refreshHealth()
@@ -70,6 +87,7 @@ Panel {
     controller.hide()
     query = ""
     errorText = ""
+    helpVisible = false
   }
 
   function parseJson(raw, fallback) {
@@ -173,7 +191,10 @@ Panel {
   }
 
   function handleEscape() {
-    if (query.trim() !== "") {
+    if (helpVisible) {
+      helpVisible = false
+      Qt.callLater(helpButton.forceActiveFocus)
+    } else if (query.trim() !== "") {
       suppressSearch = true
       query = ""
       searchDebounce.stop()
@@ -340,6 +361,16 @@ Panel {
   }
 
   Shortcut {
+    sequence: "F1"
+    context: Qt.ApplicationShortcut
+    enabled: root.opened
+    onActivated: {
+      root.helpVisible = !root.helpVisible
+      Qt.callLater(helpButton.forceActiveFocus)
+    }
+  }
+
+  Shortcut {
     sequence: "Right"
     context: Qt.ApplicationShortcut
     enabled: root.opened && (root.configured || root.demoMode)
@@ -469,7 +500,7 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: true
-    focusTarget: (root.configured || root.demoMode)
+    focusTarget: root.helpVisible ? helpButton : (root.configured || root.demoMode)
       ? (root.view === "queue" ? itemList : searchField) : connectButton
     contentWidth: fittedContentWidth(Style.space(540))
     contentHeight: fittedContentHeight(contentColumn.implicitHeight, Style.space(790))
@@ -521,7 +552,7 @@ Panel {
 
           Text {
             Layout.fillWidth: true
-            text: root.activeTrack ? root.activeTrack.title : "OmaPlex Music"
+            text: root.helpVisible ? "Keyboard map" : (root.activeTrack ? root.activeTrack.title : "OmaPlex Music")
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
@@ -531,7 +562,8 @@ Panel {
 
           Text {
             Layout.fillWidth: true
-            text: root.activeTrack ? Model.subtitle(root.activeTrack) : (root.configured ? "Choose something to play" : "Connect your Plex server")
+            text: root.helpVisible ? "Every control works without a mouse"
+              : (root.activeTrack ? Model.subtitle(root.activeTrack) : (root.configured ? "Choose something to play" : "Connect your Plex server"))
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -539,7 +571,7 @@ Panel {
           }
 
           RowLayout {
-            visible: root.activeTrack !== null
+            visible: root.activeTrack !== null && !root.helpVisible
             Layout.fillWidth: true
             spacing: Style.space(8)
 
@@ -591,7 +623,7 @@ Panel {
           }
 
           RowLayout {
-            visible: root.activeTrack !== null
+            visible: root.activeTrack !== null && !root.helpVisible
             Layout.fillWidth: true
             spacing: Style.space(8)
 
@@ -647,10 +679,81 @@ Panel {
             }
           }
         }
+
+        PanelActionButton {
+          id: helpButton
+          Layout.alignment: Qt.AlignTop
+          iconText: "?"
+          tooltipText: root.helpVisible ? "Close keyboard help" : "Keyboard help"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.body
+          bordered: root.helpVisible
+          focusable: true
+          Accessible.name: tooltipText
+          onClicked: {
+            root.helpVisible = !root.helpVisible
+            forceActiveFocus()
+          }
+        }
+      }
+
+      BorderSurface {
+        visible: root.helpVisible
+        width: parent.width
+        implicitHeight: helpColumn.implicitHeight + Style.space(20)
+        radius: Style.cornerRadius
+        color: Style.selectedFillFor(root.foreground, Color.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+
+        Column {
+          id: helpColumn
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: Style.space(10)
+          anchors.rightMargin: Style.space(10)
+          spacing: Style.space(4)
+
+          Repeater {
+            model: root.keyboardHelp
+            delegate: RowLayout {
+              required property var modelData
+              width: helpColumn.width
+              spacing: Style.space(10)
+
+              BorderSurface {
+                Layout.preferredWidth: Style.space(142)
+                Layout.preferredHeight: Style.space(22)
+                radius: Style.cornerRadius / 2
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
+                borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+
+                Text {
+                  anchors.centerIn: parent
+                  text: modelData.keys
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+
+              Text {
+                Layout.fillWidth: true
+                text: modelData.action
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
+            }
+          }
+        }
       }
 
       Row {
-        visible: root.activeTrack !== null
+        visible: root.activeTrack !== null && !root.helpVisible
         width: parent.width
         spacing: Style.space(16)
 
@@ -696,7 +799,7 @@ Panel {
 
       PanelActionButton {
         id: connectButton
-        visible: !root.configured && !root.demoMode
+        visible: !root.helpVisible && !root.configured && !root.demoMode
         width: parent.width
         height: Style.space(38)
         iconText: "\uf1c0  Connect with Plex"
@@ -709,7 +812,7 @@ Panel {
       }
 
       CursorSurface {
-        visible: !root.health.ok && root.health.code !== "unconfigured" && !root.demoMode
+        visible: !root.helpVisible && !root.health.ok && root.health.code !== "unconfigured" && !root.demoMode
         width: parent.width
         height: healthRow.implicitHeight + Style.space(14)
         foreground: Color.urgent
@@ -746,7 +849,7 @@ Panel {
       }
 
       Flickable {
-        visible: root.configured || root.demoMode
+        visible: !root.helpVisible && (root.configured || root.demoMode)
         width: parent.width
         height: Style.space(38)
         contentWidth: navRow.implicitWidth
@@ -796,7 +899,7 @@ Panel {
 
       TextField {
         id: searchField
-        visible: (root.configured || root.demoMode) && root.view !== "queue"
+        visible: !root.helpVisible && (root.configured || root.demoMode) && root.view !== "queue"
         width: parent.width
         placeholderText: "Search Plex…"
         Accessible.name: "Search Plex music"
@@ -816,7 +919,7 @@ Panel {
       }
 
       RowLayout {
-        visible: root.configured || root.demoMode
+        visible: !root.helpVisible && (root.configured || root.demoMode)
         width: parent.width
 
         PanelActionButton {
@@ -868,7 +971,7 @@ Panel {
       }
 
       Text {
-        visible: root.errorText !== ""
+        visible: !root.helpVisible && root.errorText !== ""
         width: parent.width
         text: root.errorText
         color: Color.urgent
@@ -878,7 +981,7 @@ Panel {
       }
 
       Text {
-        visible: (root.configured || root.demoMode) && !root.loading && root.errorText === "" && root.items.length === 0
+        visible: !root.helpVisible && (root.configured || root.demoMode) && !root.loading && root.errorText === "" && root.items.length === 0
         width: parent.width
         text: root.view === "search" ? "No matches." : "Nothing here yet."
         color: root.dim
@@ -889,7 +992,7 @@ Panel {
 
       ListView {
         id: itemList
-        visible: (root.configured || root.demoMode) && root.items.length > 0
+        visible: !root.helpVisible && (root.configured || root.demoMode) && root.items.length > 0
         width: parent.width
         height: Math.min(contentHeight, Style.space(330))
         spacing: Style.space(5)
@@ -1026,7 +1129,7 @@ Panel {
       }
 
       Text {
-        visible: root.configured || root.demoMode
+        visible: !root.helpVisible && (root.configured || root.demoMode)
         width: parent.width
         text: "↑↓ Select  ·  Enter Play  ·  ⇧Enter Alt  ·  Ctrl+↑↓ Move  ·  Del Remove  ·  Esc Back"
         color: root.dim

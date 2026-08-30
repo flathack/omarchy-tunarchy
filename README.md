@@ -93,6 +93,8 @@ ${XDG_CONFIG_HOME:-~/.config}/omarchy-omaplex-music/config.json
   actions, and inline Queue actions. Enter or Space activates a focused button.
 - Escape clears an active search, returns from a collection, or closes the
   panel. Ctrl+Space toggles play/pause from anywhere in the panel.
+- Open the keyboard map with the `?` button in the upper-right corner or `F1`;
+  press Escape to return to the player.
 - Hardware media keys work through MPRIS while mpv is running.
 
 The CLI is also useful for troubleshooting:
