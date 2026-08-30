@@ -38,6 +38,8 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('Qt.resolvedUrl("assets/tuna-ui-24.png")', QML)
         self.assertIn('Qt.resolvedUrl("assets/tuna-ui-64.png")', QML)
         self.assertGreaterEqual(QML.count("smooth: false"), 3)
+        self.assertNotIn("sourceClipRect", QML)
+        self.assertNotIn("tunaBrandUrl", QML)
 
     def test_play_button_reflects_playback_state(self):
         self.assertIn("id: playButton", QML)
@@ -72,6 +74,28 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("finishedRequestId === requestedDataRequestId", QML)
         self.assertIn("root.finishData(exitCode, dataOutput.text, dataError.text)", QML)
         self.assertNotIn("onStreamFinished: root.handleData(text)", QML)
+
+    def test_nested_navigation_preserves_complete_context(self):
+        self.assertIn("Model.navigationState(", QML)
+        self.assertIn("backStack.concat", QML)
+        self.assertIn("currentParentKey = String(previous.parentKey", QML)
+        self.assertIn("currentParentKind = String(previous.parentKind", QML)
+        self.assertIn("pendingSelectedIndex = Number(previous.selectedIndex", QML)
+        self.assertIn("Model.navigationArgs(previous", QML)
+        for field in ("parentKey", "parentKind", "selectedIndex"):
+            self.assertIn(field, MODEL)
+
+    def test_player_actions_are_queued_and_slider_updates_coalesced(self):
+        self.assertIn("property var pendingActions: []", QML)
+        self.assertIn("pendingActions = Model.queueAction(pendingActions, nextCommand)", QML)
+        self.assertIn('kind !== "seek" && kind !== "volume"', MODEL)
+        self.assertIn("root.pendingActions = root.pendingActions.slice(1)", QML)
+        self.assertNotIn("if (actionProc.running) return", QML)
+
+    def test_status_polling_is_adaptive(self):
+        self.assertIn("root.opened ? 1000", QML)
+        self.assertIn("root.player && root.player.playing ? 3000", QML)
+        self.assertIn("root.activeTrack ? 10000 : 30000", QML)
 
     def test_complete_keyboard_navigation_contract(self):
         self.assertGreaterEqual(QML.count("focusable: true"), 15)

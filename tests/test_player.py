@@ -1,5 +1,6 @@
 import concurrent.futures
 import contextlib
+import http.server
 import importlib.machinery
 import importlib.util
 import io
@@ -7,7 +8,9 @@ import json
 import os
 import pathlib
 import stat
+import struct
 import tempfile
+import threading
 import unittest
 import urllib.parse
 from unittest import mock
@@ -212,12 +215,36 @@ class StorageTests(unittest.TestCase):
              mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
              mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"), \
              mock.patch.object(player, "CACHE_MAX_BYTES", 5), \
-             mock.patch.object(player.urllib.request, "urlopen", return_value=Response()):
+             mock.patch.object(player, "safe_urlopen", return_value=Response()):
             player.ensure_private_dir(player.ART_CACHE_DIR)
             (player.ART_CACHE_DIR / "old.jpg").write_bytes(b"old!")
             player.art_path({"server": "http://plex", "token": "tok"}, "/thumb/1")
             total = sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir())
         self.assertLessEqual(total, 5)
+
+    def test_concurrent_art_downloads_stay_within_cache_budget(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _):
+                return b"cover"
+
+        config = {"server": "http://plex", "token": "tok"}
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
+             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"), \
+             mock.patch.object(player, "CACHE_MAX_BYTES", 10), \
+             mock.patch.object(player.urllib.request, "urlopen", side_effect=lambda *_args, **_kwargs: Response()):
+            player.compact_items(config, [
+                {"ratingKey": str(index), "type": "album", "thumb": f"/cover/{index}"}
+                for index in range(20)
+            ])
+            total = sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir() if not path.name.startswith("."))
+        self.assertLessEqual(total, 10)
 
 
 class PlexModelTests(unittest.TestCase):
@@ -227,6 +254,15 @@ class PlexModelTests(unittest.TestCase):
     def test_metadata_normalizes_missing_rows(self):
         self.assertEqual(player.metadata({}), [])
         self.assertEqual(player.metadata({"MediaContainer": {"Metadata": [{"title": "A"}]}}), [{"title": "A"}])
+        self.assertEqual(player.metadata({"MediaContainer": {"Metadata": [None, "bad", {"title": "A"}]}}),
+                         [{"title": "A"}])
+
+    def test_malformed_numeric_metadata_uses_safe_defaults(self):
+        row = {"type": "track", "year": "unknown", "duration": {}, "index": [],
+               "leafCount": "many", "viewCount": None}
+        result = player.compact_item(self.config, row, fetch_art=False)
+        self.assertEqual((result["year"], result["duration"], result["index"],
+                          result["leafCount"], result["viewCount"]), (0, 0, 0, 0, 0))
 
     def test_sections_keeps_music_libraries_only(self):
         payload = {"MediaContainer": {"Directory": [
@@ -235,6 +271,105 @@ class PlexModelTests(unittest.TestCase):
         ]}}
         with mock.patch.object(player, "plex_request", return_value=payload):
             self.assertEqual(player.sections(self.config), [{"key": "4", "title": "Music"}])
+
+    def test_configured_music_section_avoids_discovery_request(self):
+        with mock.patch.object(player, "sections") as sections:
+            self.assertEqual(player.music_section(self.config), "4")
+        sections.assert_not_called()
+
+    def test_search_compacts_artwork_as_one_concurrent_batch(self):
+        payload = {"MediaContainer": {"Hub": [
+            {"Metadata": [{"ratingKey": "1", "type": "album"}, {"ratingKey": "2", "type": "track"}]}
+        ]}}
+        with mock.patch.object(player, "plex_request", return_value=payload), \
+             mock.patch.object(player, "compact_items", side_effect=lambda _config, rows: rows) as compact:
+            result = player.search(self.config, "test", 10)
+        self.assertEqual(len(result), 2)
+        compact.assert_called_once_with(self.config, payload["MediaContainer"]["Hub"][0]["Metadata"])
+
+    def test_cross_origin_redirect_never_reaches_target_with_token(self):
+        received = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(self.headers.get("X-Plex-Token"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"MediaContainer": {}}')
+
+            def log_message(self, *_):
+                pass
+
+        target = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Target)
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/target")
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        source = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+        threads = [threading.Thread(target=server.serve_forever) for server in (source, target)]
+        for thread in threads:
+            thread.start()
+        try:
+            config = {"server": f"http://127.0.0.1:{source.server_port}", "token": "secret"}
+            with self.assertRaisesRegex(player.PlayerError, "another origin") as raised:
+                player.plex_request(config, "/redirect")
+            self.assertEqual(raised.exception.code, "unsafe-redirect")
+            self.assertEqual(received, [])
+        finally:
+            source.shutdown()
+            target.shutdown()
+            source.server_close()
+            target.server_close()
+            for thread in threads:
+                thread.join()
+
+    def test_same_origin_redirect_is_allowed(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/final")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"MediaContainer": {}}')
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            config = {"server": f"http://127.0.0.1:{server.server_port}", "token": "secret"}
+            self.assertEqual(player.plex_request(config, "/redirect"), {"MediaContainer": {}})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_https_redirect_cannot_downgrade_to_http(self):
+        request = player.urllib.request.Request("https://plex.example/library")
+        with self.assertRaisesRegex(player.PlayerError, "another origin") as raised:
+            player.SameOriginRedirectHandler().redirect_request(
+                request, None, 302, "Found", {}, "http://plex.example/library"
+            )
+        self.assertEqual(raised.exception.code, "unsafe-redirect")
+
+    def test_search_skips_malformed_hubs_and_rows(self):
+        payload = {"MediaContainer": {"Hub": [None, {"Metadata": "bad"},
+            {"Metadata": [None, {"type": "track", "ratingKey": "1"}]}]}}
+        with mock.patch.object(player, "plex_request", return_value=payload), \
+             mock.patch.object(player, "compact_items", side_effect=lambda _config, rows: rows):
+            result = player.search(self.config, "test", 10)
+        self.assertEqual(result, [{"type": "track", "ratingKey": "1"}])
 
     def test_compact_track(self):
         row = {
@@ -293,6 +428,18 @@ class PlexModelTests(unittest.TestCase):
                 with self.assertRaisesRegex(player.PlayerError, message):
                     player.mpv_command(["get_property", "pause"], True)
 
+    def test_mpv_batch_uses_one_socket_and_accepts_fragmented_replies(self):
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.recv.side_effect = [
+            b'{"request_id": 1, "error": "success", "data": fa',
+            b'lse}\n{"request_id": 2, "error": "success", "data": 42}\n',
+        ]
+        with mock.patch.object(player.socket, "socket", return_value=client) as socket_factory:
+            result = player.mpv_commands([["get_property", "pause"], ["get_property", "volume"]])
+        self.assertEqual(result, [False, 42])
+        socket_factory.assert_called_once()
+
     def test_plex_request_rejects_oversized_json(self):
         class Response:
             def __enter__(self):
@@ -305,7 +452,7 @@ class PlexModelTests(unittest.TestCase):
                 return b"x" * maximum
 
         with mock.patch.object(player, "PLEX_JSON_MAX_BYTES", 8), \
-             mock.patch.object(player.urllib.request, "urlopen", return_value=Response()):
+             mock.patch.object(player, "safe_urlopen", return_value=Response()):
             with self.assertRaisesRegex(player.PlayerError, "oversized") as raised:
                 player.plex_request(self.config, "/library/sections")
         self.assertEqual(raised.exception.code, "invalid-response")
@@ -321,7 +468,7 @@ class PlexModelTests(unittest.TestCase):
             def read(self, _):
                 return b'{"MediaContainer": {}}'
 
-        with mock.patch.object(player.urllib.request, "urlopen", return_value=Response()):
+        with mock.patch.object(player, "safe_urlopen", return_value=Response()):
             self.assertEqual(player.plex_request(self.config, "/library/sections"), {"MediaContainer": {}})
 
     def test_plex_cloud_request_uses_its_smaller_response_limit(self):
@@ -338,7 +485,7 @@ class PlexModelTests(unittest.TestCase):
 
         response = Response()
         with mock.patch.object(player, "PLEX_CLOUD_JSON_MAX_BYTES", 32), \
-             mock.patch.object(player.urllib.request, "urlopen", return_value=response):
+             mock.patch.object(player, "safe_urlopen", return_value=response):
             self.assertEqual(player.plex_cloud_request("/user"), {})
         self.assertEqual(response.maximum, 33)
 
@@ -407,7 +554,7 @@ class PlexModelTests(unittest.TestCase):
         first = {"server": "http://plex-a:32400", "token": "first", "section": "4"}
         second = {"server": "http://plex-b:32400", "token": "second", "section": "4"}
         with tempfile.TemporaryDirectory() as folder, \
-             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder)), \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
              mock.patch.object(player.urllib.request, "urlopen", side_effect=[Response(b"first"), Response(b"second")]) as request:
             first_uri = player.art_path(first, "/library/metadata/1/thumb/2")
             second_uri = player.art_path(second, "/library/metadata/1/thumb/2")
@@ -443,6 +590,22 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(result["code"], "timeout")
         self.assertFalse(result["ok"])
 
+    def test_logout_clears_persisted_queue_metadata(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"), \
+             mock.patch.object(player, "STATE_FILE", pathlib.Path(folder) / "state.json"), \
+             mock.patch.object(player, "shutdown_player"):
+            player.atomic_json(player.CONFIG_FILE, {"server": "https://plex", "token": "secret",
+                                                    "clientIdentifier": "client"})
+            player.atomic_json(player.STATE_FILE, {"queue": [{"title": "Private title"}]})
+            player.logout()
+            self.assertFalse(player.STATE_FILE.exists())
+            self.assertNotIn("token", player.load_json(player.CONFIG_FILE, {}))
+
+    def test_configure_parser_rejects_plaintext_token_argument(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            player.parser().parse_args(["configure", "--token", "secret"])
+
 
 class PlayerTests(unittest.TestCase):
     def setUp(self):
@@ -451,6 +614,9 @@ class PlayerTests(unittest.TestCase):
         self.state_patch = mock.patch.object(player, "STATE_FILE", pathlib.Path(self.state_folder.name) / "state.json")
         self.state_patch.start()
         self.addCleanup(self.state_patch.stop)
+        self.socket_patch = mock.patch.object(player, "SOCKET_FILE", pathlib.Path(self.state_folder.name) / "mpv.sock")
+        self.socket_patch.start()
+        self.addCleanup(self.socket_patch.stop)
 
     def test_play_replaces_old_queue_then_appends_album(self):
         rows = [
@@ -548,6 +714,86 @@ class PlayerTests(unittest.TestCase):
         status.assert_called_once()
         self.assertFalse(result["playing"])
 
+    def test_stopped_queue_selection_starts_selected_item(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        stored = [{"key": "1", "_part": "/1"}, {"key": "2", "_part": "/2"}]
+        player.atomic_json(player.STATE_FILE, {"queue": stored, "queueNamespace": player.cache_namespace(config)})
+        with mock.patch.object(player, "load_config", return_value=config), \
+             mock.patch.object(player, "mpv_running", return_value=False), \
+             mock.patch.object(player, "prepare_saved_queue", side_effect=lambda _config, queue: (queue, [item["_part"] for item in queue])), \
+             mock.patch.object(player, "activate_queue", return_value={"playing": True}) as activate, \
+             mock.patch.object(player, "queue_view", return_value={"items": []}):
+            player.queue_action("play", index=1)
+        self.assertEqual([item["key"] for item in activate.call_args.args[1]], ["2", "1"])
+
+    def test_stopped_play_next_activates_exact_persisted_order(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        stored = [{"key": "old", "_part": "/old"}]
+        player.atomic_json(player.STATE_FILE, {"queue": stored, "queueNamespace": player.cache_namespace(config)})
+        with mock.patch.object(player, "load_config", return_value=config), \
+             mock.patch.object(player, "mpv_running", return_value=False), \
+             mock.patch.object(player, "raw_track", return_value=({"key": "new"}, "/new")), \
+             mock.patch.object(player, "prepare_saved_queue", side_effect=lambda _config, queue: (queue, [item["_part"] for item in queue])), \
+             mock.patch.object(player, "activate_queue", return_value={"playing": True}) as activate, \
+             mock.patch.object(player, "queue_view", return_value={"items": []}):
+            player.queue_action("play-next", track_key="new")
+        queue, urls = activate.call_args.args[1:3]
+        self.assertEqual([item["key"] for item in queue], ["old", "new"])
+        self.assertEqual(urls, ["/old", "/new"])
+
+    def test_stopped_queue_has_no_current_item_and_first_can_be_removed(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        player.atomic_json(player.STATE_FILE, {
+            "queue": [{"key": "1"}, {"key": "2"}], "queueNamespace": player.cache_namespace(config)
+        })
+        with mock.patch.object(player, "load_config", return_value=config), \
+             mock.patch.object(player, "mpv_running", return_value=False), \
+             mock.patch.object(player, "mpv_properties", return_value=None):
+            result = player.queue_action("remove", index=0)
+        self.assertEqual(result["currentIndex"], -1)
+        self.assertEqual([item["key"] for item in result["items"]], ["2"])
+        self.assertFalse(result["items"][0]["current"])
+
+    def test_clear_upcoming_clears_the_whole_stopped_queue(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        player.atomic_json(player.STATE_FILE, {
+            "queue": [{"key": "1"}, {"key": "2"}], "queueNamespace": player.cache_namespace(config)
+        })
+        with mock.patch.object(player, "load_config", return_value=config), \
+             mock.patch.object(player, "mpv_running", return_value=False), \
+             mock.patch.object(player, "mpv_properties", return_value=None):
+            result = player.queue_action("clear-upcoming")
+        self.assertEqual(result["items"], [])
+
+    def test_mismatched_account_queue_is_hidden(self):
+        current = {"server": "http://plex", "token": "new", "section": "4"}
+        previous = {"server": "http://plex", "token": "old", "section": "4"}
+        player.atomic_json(player.STATE_FILE, {
+            "queue": [{"key": "1", "title": "Private"}], "queueNamespace": player.cache_namespace(previous)
+        })
+        with mock.patch.object(player, "load_config", return_value=current), \
+             mock.patch.object(player, "mpv_properties", return_value=None):
+            self.assertEqual(player.queue_view()["items"], [])
+
+    def test_duplicate_queue_entries_are_reconciled_by_occurrence(self):
+        digest = player.hashlib.sha256(b"http://plex/repeat").hexdigest()
+        first = {"key": "first", "_streamHash": digest}
+        second = {"key": "second", "_streamHash": digest}
+        result = player.reconcile_queue([first, second], [
+            {"filename": "http://plex/repeat"}, {"filename": "http://plex/repeat"}
+        ])
+        self.assertEqual([item["key"] for item in result], ["first", "second"])
+
+    def test_status_uses_one_batched_property_snapshot(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        snapshot = {"playlist": [], "playlist-pos": 0, "pause": False, "idle-active": True,
+                    "time-pos": 0, "duration": 0, "volume": 100}
+        with mock.patch.object(player, "mpv_properties", return_value=snapshot) as properties, \
+             mock.patch.object(player, "sync_queue_from_mpv", return_value={"queue": [], "shuffle": False, "repeat": "off"}), \
+             mock.patch.object(player, "update_timeline"):
+            player.status(config)
+        properties.assert_called_once()
+
     def test_rejected_load_restores_previous_state_and_stops_new_player(self):
         old = {"queue": [{"key": "old"}], "shuffle": False, "repeat": "off"}
         player.atomic_json(player.STATE_FILE, old)
@@ -623,9 +869,12 @@ class PlayerTests(unittest.TestCase):
         self.assertEqual(result["repeat"], "all")
 
     def test_queue_remove_updates_mpv_and_state(self):
-        state = {"queue": [{"key": "1"}, {"key": "2"}], "repeat": "off", "shuffle": False}
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        state = {"queue": [{"key": "1"}, {"key": "2"}], "repeat": "off", "shuffle": False,
+                 "queueNamespace": player.cache_namespace(config)}
         player.atomic_json(player.STATE_FILE, state)
         with mock.patch.object(player, "mpv_running", return_value=True), \
+             mock.patch.object(player, "load_config", return_value=config), \
              mock.patch.object(player, "property_or", return_value=0), \
              mock.patch.object(player, "player_snapshot", return_value={"running": True, "urls": []}), \
              mock.patch.object(player, "mpv_command") as command, \
@@ -636,9 +885,12 @@ class PlayerTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 1)
 
     def test_rejected_queue_command_does_not_commit_local_state(self):
-        original = {"queue": [{"key": "1"}, {"key": "2"}], "repeat": "off", "shuffle": False}
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        original = {"queue": [{"key": "1"}, {"key": "2"}], "repeat": "off", "shuffle": False,
+                    "queueNamespace": player.cache_namespace(config)}
         player.atomic_json(player.STATE_FILE, original)
         with mock.patch.object(player, "mpv_running", return_value=True), \
+             mock.patch.object(player, "load_config", return_value=config), \
              mock.patch.object(player, "property_or", return_value=0), \
              mock.patch.object(player, "player_snapshot", return_value={"running": True, "urls": []}), \
              mock.patch.object(player, "mpv_command", side_effect=player.PlayerError("rejected", "player-ipc")), \
@@ -671,7 +923,7 @@ class PlayerTests(unittest.TestCase):
         config = {"server": "http://plex", "token": "secret", "clientIdentifier": "client-1"}
         report = {"sessionId": "session-1", "trackKey": "42", "state": "playing",
                   "positionMs": 1234, "durationMs": 5678}
-        with mock.patch.object(player.urllib.request, "urlopen", return_value=context) as urlopen:
+        with mock.patch.object(player, "safe_urlopen", return_value=context) as urlopen:
             self.assertTrue(player.send_timeline(config, report))
         request = urlopen.call_args.args[0]
         query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
@@ -751,7 +1003,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.6.1")
+        self.assertEqual(manifest["version"], "0.7.0")
         self.assertIn(f'APP_VERSION = "{manifest["version"]}"', HELPER.read_text(encoding="utf-8"))
         for asset in ("tuna-brand.png", "tuna-ui-18.png", "tuna-ui-24.png", "tuna-ui-64.png"):
             self.assertTrue((ROOT / "assets" / asset).is_file())
@@ -767,6 +1019,19 @@ class RepositoryContractTests(unittest.TestCase):
             if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts:
                 source = path.read_bytes()
                 self.assertNotIn(forbidden, source, str(path))
+
+    def test_tuna_assets_are_runtime_sized_and_bounded(self):
+        expected = {
+            "tuna-brand.png": (512, 254),
+            "tuna-ui-18.png": (18, 12),
+            "tuna-ui-24.png": (24, 14),
+            "tuna-ui-64.png": (64, 40),
+        }
+        for name, dimensions in expected.items():
+            payload = (ROOT / "assets" / name).read_bytes()
+            self.assertEqual(payload[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(struct.unpack(">II", payload[16:24]), dimensions)
+            self.assertLess(len(payload), 100_000)
 
 
 if __name__ == "__main__":

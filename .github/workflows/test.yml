@@ -20,4 +20,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python3 -m py_compile bin/tunarchy
+      - run: python3 tests/validate_manifest.py
       - run: python3 -m unittest discover -s tests -v
+      - run: node --test tests/test_model.js

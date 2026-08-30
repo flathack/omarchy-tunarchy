@@ -23,6 +23,15 @@ last-good library payloads are stored in
 `${XDG_CACHE_HOME:-~/.cache}/tunarchy`, whose size and age are
 bounded automatically. Demo mode does not read credentials or contact Plex.
 
+Use an HTTPS Plex server URL whenever possible. TLS certificates are verified
+with the system trust store, and credential-bearing API and timeline redirects
+are restricted to the original scheme, host, and port. Plain HTTP exposes the
+token to anyone able to observe that network path and should only be used on a
+trusted private network or through an encrypted tunnel such as Tailscale.
+Manual token entry uses a non-echoing prompt; tokens are intentionally rejected
+as command-line arguments because process listings and shell history are not
+private credential stores.
+
 As with every Omarchy shell plugin, the QML and helper execute unsandboxed as
 the logged-in user. Review updates before accepting them.
 

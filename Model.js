@@ -28,3 +28,42 @@ function subtitle(item) {
   if (artist && album && artist !== album) return artist + " · " + album
   return artist || album
 }
+
+function navigationState(view, key, kind, title, query, selectedIndex) {
+  return {
+    view: String(view || "recent"),
+    parentKey: String(key || ""),
+    parentKind: String(kind || ""),
+    title: String(title || ""),
+    query: String(query || ""),
+    selectedIndex: Math.max(0, Number(selectedIndex) || 0)
+  }
+}
+
+function navigationArgs(state, recentLimit, libraryLimit) {
+  var previous = state || navigationState("recent")
+  if (previous.view === "children")
+    return ["children", previous.parentKind, previous.parentKey]
+  if (previous.view === "search")
+    return ["search", previous.query, "--limit", "35"]
+  if (previous.view === "queue") return ["queue"]
+  return ["library", previous.view, "--limit",
+          String(previous.view === "recent" ? recentLimit : libraryLimit)]
+}
+
+function actionKind(command) {
+  var values = safeArray(command)
+  for (var index = 0; index < values.length - 1; index++)
+    if (values[index] === "control") return String(values[index + 1])
+  return "transport"
+}
+
+function queueAction(pending, nextCommand) {
+  var queued = safeArray(pending)
+  var kind = actionKind(nextCommand)
+  if (kind !== "seek" && kind !== "volume") return queued.concat([nextCommand])
+  var retained = []
+  for (var index = 0; index < queued.length; index++)
+    if (actionKind(queued[index]) !== kind) retained.push(queued[index])
+  return retained.concat([nextCommand])
+}

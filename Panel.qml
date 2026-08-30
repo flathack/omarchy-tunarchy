@@ -35,6 +35,8 @@ Panel {
   property bool suppressSearch: false
   property int pendingSelectedIndex: -1
   property bool helpVisible: false
+  property var pendingActions: []
+  property var pendingQueueEdits: []
 
   readonly property var navigation: [
     { id: "recent", label: "Home", icon: "\uf015" },
@@ -63,11 +65,8 @@ Panel {
   ]
 
   readonly property url helperUrl: Qt.resolvedUrl("bin/tunarchy")
-  readonly property url tunaBrandUrl: Qt.resolvedUrl("assets/tuna-brand.png")
   readonly property url tuna24Url: Qt.resolvedUrl("assets/tuna-ui-24.png")
   readonly property url tuna64Url: Qt.resolvedUrl("assets/tuna-ui-64.png")
-  readonly property rect tuna24Clip: Qt.rect(350, 250, 850, 525)
-  readonly property rect tuna64Clip: Qt.rect(60, 35, 1440, 900)
   readonly property string helperPath: decodeURIComponent(String(helperUrl).replace(/^file:\/\//, ""))
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -224,7 +223,8 @@ Panel {
   }
 
   function openContainer(item) {
-    backStack = [{ view: view, title: currentParentTitle, query: query }]
+    backStack = backStack.concat([Model.navigationState(
+      view, currentParentKey, currentParentKind, currentParentTitle, query, selectedIndex)])
     suppressSearch = true
     query = ""
     searchDebounce.stop()
@@ -237,11 +237,20 @@ Panel {
   }
 
   function goBack() {
-    var previous = backStack.length > 0 ? backStack[backStack.length - 1] : { view: "recent" }
-    if (previous.view === "search" && String(previous.query || "").trim() !== "") {
-      query = String(previous.query)
-      searchNow()
-    } else loadView(previous.view || "recent")
+    var previous = backStack.length > 0
+      ? backStack[backStack.length - 1] : Model.navigationState("recent")
+    backStack = backStack.slice(0, Math.max(0, backStack.length - 1))
+    suppressSearch = true
+    query = String(previous.query || "")
+    searchDebounce.stop()
+    Qt.callLater(function() { root.suppressSearch = false })
+    view = String(previous.view || "recent")
+    currentParentKey = String(previous.parentKey || "")
+    currentParentKind = String(previous.parentKind || "")
+    currentParentTitle = String(previous.title || "")
+    pendingSelectedIndex = Number(previous.selectedIndex || 0)
+    var args = Model.navigationArgs(previous, setting("recentAlbumCount", 20), setting("libraryItemCount", 100))
+    runData(view, command(args))
   }
 
   function handleEscape() {
@@ -270,7 +279,7 @@ Panel {
   }
 
   function activateItem(item) {
-    if (!item || actionProc.running) return
+    if (!item) return
     if (item.type === "album" || item.type === "artist" || item.type === "playlist") { openContainer(item); return }
     if (view === "queue") { runQueueAction("play", Number(item.queueIndex)); return }
     var args = ["play", String(item.key)]
@@ -279,9 +288,12 @@ Panel {
     runAction(command(args))
   }
 
-  function runAction(command) {
-    if (actionProc.running) return
-    actionProc.command = command
+  function runAction(nextCommand) {
+    if (actionProc.running) {
+      pendingActions = Model.queueAction(pendingActions, nextCommand)
+      return
+    }
+    actionProc.command = nextCommand
     actionProc.running = true
   }
 
@@ -325,8 +337,15 @@ Panel {
   function playNext(item) {
     if (!item) return
     if (!activeTrack) { activateItem(item); return }
-    if (queueEditProc.running) return
-    queueEditProc.command = command(["queue-action", "play-next", "--track", String(item.key)])
+    runQueueEdit(command(["queue-action", "play-next", "--track", String(item.key)]))
+  }
+
+  function runQueueEdit(nextCommand) {
+    if (queueEditProc.running) {
+      pendingQueueEdits = pendingQueueEdits.concat([nextCommand])
+      return
+    }
+    queueEditProc.command = nextCommand
     queueEditProc.running = true
   }
 
@@ -447,6 +466,11 @@ Panel {
     onExited: function(exitCode) {
       if (exitCode !== 0) root.errorText = root.errorMessage(queueEditError.text, "Could not update the queue.")
       root.refreshStatus()
+      if (root.pendingQueueEdits.length > 0) {
+        var nextCommand = root.pendingQueueEdits[0]
+        root.pendingQueueEdits = root.pendingQueueEdits.slice(1)
+        Qt.callLater(function() { root.runQueueEdit(nextCommand) })
+      }
     }
   }
 
@@ -478,11 +502,16 @@ Panel {
       if (exitCode !== 0) root.errorText = root.errorMessage(actionError.text, "Player action failed.")
       root.refreshStatus()
       if (root.view === "queue") root.runData("queue", root.command(["queue"]))
+      if (root.pendingActions.length > 0) {
+        var nextCommand = root.pendingActions[0]
+        root.pendingActions = root.pendingActions.slice(1)
+        Qt.callLater(function() { root.runAction(nextCommand) })
+      }
     }
   }
 
   Timer {
-    interval: root.opened ? 1000 : 3000
+    interval: root.opened ? 1000 : (root.player && root.player.playing ? 3000 : (root.activeTrack ? 10000 : 30000))
     running: true
     repeat: true
     triggeredOnStart: true
@@ -554,7 +583,6 @@ Panel {
           anchors.fill: parent
           anchors.margins: Style.space(2)
           source: root.tuna24Url
-          sourceClipRect: root.tuna24Clip
           fillMode: Image.PreserveAspectFit
           smooth: false
           mipmap: false
@@ -625,7 +653,6 @@ Panel {
             height: width
             visible: root.helpVisible || headerCover.status !== Image.Ready
             source: root.helpVisible ? root.tuna64Url : root.tuna24Url
-            sourceClipRect: root.helpVisible ? root.tuna64Clip : root.tuna24Clip
             fillMode: Image.PreserveAspectFit
             smooth: false
             mipmap: false
@@ -790,7 +817,6 @@ Panel {
             width: Style.space(22)
             height: width
             source: root.tuna24Url
-            sourceClipRect: root.tuna24Clip
             fillMode: Image.PreserveAspectFit
             smooth: false
             mipmap: false

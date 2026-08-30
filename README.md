@@ -62,11 +62,16 @@ The same flow is available from a terminal:
 ~/.config/omarchy/plugins/io.github.flathack.tunarchy/bin/tunarchy login
 ```
 
-Enter the base URL, for example `http://192.168.1.20:32400`. If the server has
-several music libraries, setup asks which one to use.
+Enter the HTTPS base URL, for example `https://plex.example.net:32400`. Tunarchy
+verifies TLS certificates and refuses to forward credentials across origins or
+from HTTPS to HTTP redirects. Use a plain `http://` address only on a network
+you trust or inside an encrypted tunnel such as Tailscale; the Plex token is
+otherwise visible to devices that can observe that connection. If the server
+has several music libraries, setup asks which one to use.
 
-Right-clicking the bar widget retains the manual token setup as a recovery
-fallback. Plex documents that fallback in
+Right-clicking the bar widget retains an interactive manual token setup as a
+recovery fallback. The token is read without echo and is never accepted as a
+command-line argument. Plex documents that fallback in
 [Finding an authentication token / X-Plex-Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
 
 Connection details are stored in:
@@ -85,7 +90,8 @@ ${XDG_CONFIG_HOME:-~/.config}/tunarchy/config.json
 - Use the navigation rail to browse artists, albums, playlists, history,
   favorites, and the active queue.
 - Click a collection to open it, or use its inline play/shuffle actions.
-- Reorder or remove upcoming tracks in the Queue view.
+- Reorder or remove upcoming tracks in the Queue view. When playback is stopped,
+  **Clear upcoming** clears the complete saved queue because there is no current track.
 - Use Left/Right to switch library tabs when the search field is empty. While
   editing a query, those keys move the text cursor normally.
 - Use Up/Down to select rows and Enter to open or play them.
@@ -174,10 +180,10 @@ omarchy-shell shell rescanPlugins
 
 The generated Tuna artwork is stored in four transparent PNG variants:
 
-- `assets/tuna-brand.png` — detailed brand artwork
-- `assets/tuna-ui-18.png` — smallest UI sprite variant
-- `assets/tuna-ui-24.png` — bar and compact help button sprite
-- `assets/tuna-ui-64.png` — keyboard-help header artwork
+- `assets/tuna-brand.png` — cropped, 512-pixel detailed brand artwork
+- `assets/tuna-ui-18.png` — 18-pixel smallest UI sprite variant
+- `assets/tuna-ui-24.png` — 24-pixel bar and compact help button sprite
+- `assets/tuna-ui-64.png` — 64-pixel keyboard-help header artwork
 
 ## Privacy and limitations
 
