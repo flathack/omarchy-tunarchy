@@ -4,6 +4,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 QML = (ROOT / "Panel.qml").read_text(encoding="utf-8")
+MODEL = (ROOT / "Model.js").read_text(encoding="utf-8")
 
 
 class QmlContractTests(unittest.TestCase):
@@ -42,6 +43,8 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("id: playButton", QML)
         self.assertIn('iconText: root.player && root.player.playing ? "\\uf04c" : "\\uf04b"', QML)
         self.assertIn('tooltipText: root.player && root.player.playing ? "Pause" : "Play"', QML)
+        self.assertGreaterEqual(QML.count('root.player && root.player.playing ? "\\uf04c" : "\\uf04b"'), 2)
+        self.assertIn('status.playing ? "\\uf04c  " : "\\uf04b  "', MODEL)
 
     def test_library_and_queue_navigation_are_present(self):
         for view in ('"artists"', '"albums"', '"playlists"', '"history"', '"frequent"', '"favorites"', '"queue"'):

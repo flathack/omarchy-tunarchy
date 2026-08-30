@@ -15,9 +15,11 @@ are written to private, exclusively created temporary files and atomically
 replaced within the same verified directory.
 
 The PIN login exchanges its one-time code directly with `plex.tv`. The resulting
-token is sent only to Plex and the configured Plex server. Playback URLs are passed
-to mpv over a user-owned Unix socket rather than on mpv's command line. Cover
-art and last-good library payloads are stored in
+token is sent only to Plex, the configured Plex server, and the local mpv process.
+Tunarchy passes it to mpv as a file-local HTTP header over a user-owned Unix
+socket; it is not included in process arguments, playback URLs, or MPRIS metadata,
+and unrelated URLs opened in mpv do not inherit it. Cover art and
+last-good library payloads are stored in
 `${XDG_CACHE_HOME:-~/.cache}/tunarchy`, whose size and age are
 bounded automatically. Demo mode does not read credentials or contact Plex.
 

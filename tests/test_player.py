@@ -176,6 +176,39 @@ class StorageTests(unittest.TestCase):
             self.assertGreaterEqual(result["removed"], 2)
             self.assertLessEqual(sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir()), 25)
 
+    def test_cache_cleanup_ignores_atomic_temporary_files(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
+             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"):
+            player.ensure_private_dir(player.ART_CACHE_DIR)
+            temporary = player.ART_CACHE_DIR / ".cover.random.tmp"
+            temporary.write_bytes(b"in progress")
+            player.cleanup_cache(max_age_days=0, max_bytes=1)
+            self.assertTrue(temporary.exists())
+
+    def test_art_download_enforces_cache_size_immediately(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _):
+                return b"new!"
+
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CACHE_DIR", pathlib.Path(folder)), \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
+             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"), \
+             mock.patch.object(player, "CACHE_MAX_BYTES", 5), \
+             mock.patch.object(player.urllib.request, "urlopen", return_value=Response()):
+            player.ensure_private_dir(player.ART_CACHE_DIR)
+            (player.ART_CACHE_DIR / "old.jpg").write_bytes(b"old!")
+            player.art_path({"server": "http://plex", "token": "tok"}, "/thumb/1")
+            total = sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir())
+        self.assertLessEqual(total, 5)
+
 
 class PlexModelTests(unittest.TestCase):
     def setUp(self):
@@ -216,9 +249,67 @@ class PlexModelTests(unittest.TestCase):
         self.assertEqual(request.call_args.args[1], "/library/sections/4/recentlyAdded")
         self.assertEqual(request.call_args.args[2]["X-Plex-Container-Size"], 50)
 
-    def test_stream_url_encodes_token(self):
+    def test_stream_url_keeps_token_out_of_mpris_visible_path(self):
         url = player.stream_url({"server": "http://plex", "token": "a b&c"}, "/library/parts/7/file.flac")
-        self.assertEqual(url, "http://plex/library/parts/7/file.flac?X-Plex-Token=a+b%26c")
+        self.assertEqual(url, "http://plex/library/parts/7/file.flac")
+        self.assertNotIn("token", url.lower())
+
+    def test_mpv_auth_uses_file_local_http_header(self):
+        with mock.patch.object(player, "mpv_command") as command:
+            player.load_stream({"token": "a b&c"}, "http://plex/part", "replace")
+        command.assert_called_once_with([
+            "loadfile", "http://plex/part", "replace", -1,
+            {"http-header-fields": "X-Plex-Token: a b&c"},
+        ])
+
+    def test_plex_request_rejects_oversized_json(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, maximum):
+                return b"x" * maximum
+
+        with mock.patch.object(player, "PLEX_JSON_MAX_BYTES", 8), \
+             mock.patch.object(player.urllib.request, "urlopen", return_value=Response()):
+            with self.assertRaisesRegex(player.PlayerError, "oversized") as raised:
+                player.plex_request(self.config, "/library/sections")
+        self.assertEqual(raised.exception.code, "invalid-response")
+
+    def test_plex_request_accepts_bounded_json(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _):
+                return b'{"MediaContainer": {}}'
+
+        with mock.patch.object(player.urllib.request, "urlopen", return_value=Response()):
+            self.assertEqual(player.plex_request(self.config, "/library/sections"), {"MediaContainer": {}})
+
+    def test_plex_cloud_request_uses_its_smaller_response_limit(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, maximum):
+                self.maximum = maximum
+                return b"{}"
+
+        response = Response()
+        with mock.patch.object(player, "PLEX_CLOUD_JSON_MAX_BYTES", 32), \
+             mock.patch.object(player.urllib.request, "urlopen", return_value=response):
+            self.assertEqual(player.plex_cloud_request("/user"), {})
+        self.assertEqual(response.maximum, 33)
 
     def test_library_list_applies_client_side_limit(self):
         payload = {"MediaContainer": {"Metadata": [
@@ -335,11 +426,49 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "status", return_value={"playing": True}):
             result = player.play({"server": "http://plex", "token": "tok"}, "2", "album")
         self.assertIn("/part/2", command.call_args_list[0].args[0][1])
-        self.assertEqual(command.call_args_list[0].args[0][-1], "replace")
-        self.assertEqual(command.call_args_list[1].args[0], ["set_property", "pause", False])
-        self.assertEqual(command.call_args_list[2].args[0][-1], "append")
+        self.assertEqual(command.call_args_list[0].args[0][2], "replace")
+        self.assertEqual(command.call_args_list[1].args[0][2], "append")
+        self.assertEqual(command.call_args_list[2].args[0], ["set_property", "pause", False])
         self.assertEqual(command.call_args_list[3].args[0], ["set_property", "playlist-pos", 0])
         self.assertTrue(result["playing"])
+
+    def test_collection_resolution_failure_does_not_mutate_player_or_state(self):
+        queue = [
+            {"key": "1", "type": "track", "title": "First"},
+            {"key": "2", "type": "track", "title": "Second"},
+        ]
+        player.atomic_json(player.STATE_FILE, {"queue": [{"key": "old"}]})
+        with mock.patch.object(player, "album_tracks", return_value=queue), \
+             mock.patch.object(player, "raw_track", side_effect=[
+                 ({"key": "1", "title": "First"}, "/part/1"),
+                 player.PlayerError("missing", "server-error"),
+             ]), \
+             mock.patch.object(player, "start_mpv") as start, \
+             mock.patch.object(player, "mpv_command") as command:
+            with self.assertRaisesRegex(player.PlayerError, "missing"):
+                player.play({"server": "http://plex", "token": "tok"}, "1", "album")
+        start.assert_not_called()
+        command.assert_not_called()
+        self.assertEqual(player.state_data()["queue"], [{"key": "old"}])
+
+    def test_shutdown_reports_timeline_and_quits_mpv(self):
+        config = {"server": "http://plex", "token": "tok"}
+        with mock.patch.object(player, "stop_timeline") as stop, \
+             mock.patch.object(player, "mpv_running", side_effect=[True, False]), \
+             mock.patch.object(player, "mpv_command") as command:
+            result = player.shutdown_player(config)
+        stop.assert_called_once_with(config)
+        command.assert_called_once_with(["quit"])
+        self.assertTrue(result["stopped"])
+
+    def test_shutdown_is_idempotent_without_player(self):
+        with mock.patch.object(player, "stop_timeline") as stop, \
+             mock.patch.object(player, "mpv_running", return_value=False), \
+             mock.patch.object(player, "mpv_command") as command:
+            result = player.shutdown_player({})
+        stop.assert_called_once_with({})
+        command.assert_not_called()
+        self.assertTrue(result["stopped"])
 
     def test_control_clamps_volume(self):
         with mock.patch.object(player, "load_config", return_value={}), \
@@ -487,7 +616,8 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.5.0")
+        self.assertEqual(manifest["version"], "0.6.0")
+        self.assertIn(f'APP_VERSION = "{manifest["version"]}"', HELPER.read_text(encoding="utf-8"))
         for asset in ("tuna-brand.png", "tuna-ui-18.png", "tuna-ui-24.png", "tuna-ui-64.png"):
             self.assertTrue((ROOT / "assets" / asset).is_file())
         self.assertTrue((ROOT / "preview.png").is_file())

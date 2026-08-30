@@ -1198,7 +1198,7 @@ Panel {
               spacing: Style.space(2)
               Text {
                 visible: mediaRow.modelData.current === true
-                text: root.player && root.player.playing ? "\uf04b" : "\uf04c"
+                text: root.player && root.player.playing ? "\uf04c" : "\uf04b"
                 color: Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption

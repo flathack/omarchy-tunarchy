@@ -34,13 +34,16 @@ SOCKET_FILE = CACHE_DIR / "mpv.sock"
 DATA_CACHE_DIR = CACHE_DIR / "data"
 ART_CACHE_DIR = CACHE_DIR / "art"
 APP_NAME = "Tunarchy"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 PLEX_AUTH_URL = "https://plex.tv/api/v2"
 TIMELINE_INTERVAL_SECONDS = 10
 CONFIG_MAX_BYTES = 64 * 1024
 STATE_MAX_BYTES = 8 * 1024 * 1024
 DATA_MAX_BYTES = 16 * 1024 * 1024
 ART_MAX_BYTES = 4 * 1024 * 1024
+PLEX_JSON_MAX_BYTES = 16 * 1024 * 1024
+PLEX_CLOUD_JSON_MAX_BYTES = 1024 * 1024
+CACHE_MAX_BYTES = 256 * 1024 * 1024
 
 
 class PlayerError(RuntimeError):
@@ -267,6 +270,19 @@ def load_config(required: bool = True) -> dict[str, Any]:
     return data
 
 
+def response_json(response: Any, maximum: int) -> dict[str, Any]:
+    payload = response.read(maximum + 1)
+    if len(payload) > maximum:
+        raise PlayerError("Plex returned an oversized response.", "invalid-response")
+    try:
+        result = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PlayerError("Plex returned an unreadable response.", "invalid-response") from error
+    if not isinstance(result, dict):
+        raise PlayerError("Plex returned an unexpected response.", "invalid-response")
+    return result
+
+
 def plex_request(config: dict[str, Any], path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     query = dict(params or {})
     url = config["server"] + path
@@ -284,7 +300,7 @@ def plex_request(config: dict[str, Any], path: str, params: dict[str, Any] | Non
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            return json.load(response)
+            return response_json(response, PLEX_JSON_MAX_BYTES)
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
             raise PlayerError("Plex sign-in expired. Connect the account again.", "unauthorized") from error
@@ -295,8 +311,6 @@ def plex_request(config: dict[str, Any], path: str, params: dict[str, Any] | Non
         raise PlayerError(f"Plex is not reachable: {reason}", code) from error
     except TimeoutError as error:
         raise PlayerError("Plex did not answer in time.", "timeout") from error
-    except json.JSONDecodeError as error:
-        raise PlayerError("Plex returned an unreadable response.", "invalid-response") from error
 
 
 def plex_cloud_request(path: str, method: str = "GET", fields: dict[str, Any] | None = None,
@@ -316,14 +330,12 @@ def plex_cloud_request(path: str, method: str = "GET", fields: dict[str, Any] | 
     request = urllib.request.Request(PLEX_AUTH_URL + path, headers=headers, data=data, method=method)
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            return json.load(response)
+            return response_json(response, PLEX_CLOUD_JSON_MAX_BYTES)
     except urllib.error.HTTPError as error:
         code = "unauthorized" if error.code in (401, 403) else "plex-cloud"
         raise PlayerError(f"Plex sign-in returned HTTP {error.code}.", code) from error
     except (urllib.error.URLError, TimeoutError) as error:
         raise PlayerError(f"Plex sign-in is not reachable: {error}", "plex-cloud") from error
-    except json.JSONDecodeError as error:
-        raise PlayerError("Plex sign-in returned an unreadable response.", "invalid-response") from error
 
 
 def validate_account_token(token: str) -> bool:
@@ -399,7 +411,7 @@ def login(server: str, section: str = "", no_browser: bool = False) -> dict[str,
 
 def logout() -> dict[str, Any]:
     data = load_settings()
-    stop_timeline(data)
+    shutdown_player(data)
     preserved = {"clientIdentifier": data.get("clientIdentifier") or client_identifier()}
     atomic_json(CONFIG_FILE, preserved, maximum=CONFIG_MAX_BYTES)
     return {"connected": False}
@@ -430,7 +442,7 @@ def music_section(config: dict[str, Any]) -> str:
     return available[0]["key"]
 
 
-def cleanup_cache(max_age_days: int = 30, max_bytes: int = 256 * 1024 * 1024) -> dict[str, int]:
+def cleanup_cache(max_age_days: int = 30, max_bytes: int = CACHE_MAX_BYTES) -> dict[str, int]:
     now = time.time()
     candidates: list[tuple[float, int, pathlib.Path]] = []
     for folder in (ART_CACHE_DIR, DATA_CACHE_DIR):
@@ -438,6 +450,8 @@ def cleanup_cache(max_age_days: int = 30, max_bytes: int = 256 * 1024 * 1024) ->
             with secure_parent_directory(folder / ".scan") as (parent, _):
                 with os.scandir(parent) as entries:
                     for entry in entries:
+                        if entry.name.startswith("."):
+                            continue
                         try:
                             info = entry.stat(follow_symlinks=False)
                             if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid():
@@ -497,7 +511,7 @@ def cache_namespace(config: dict[str, Any]) -> str:
     return hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
-def art_path(config: dict[str, Any], source: str | None) -> str:
+def art_path(config: dict[str, Any], source: str | None, enforce_capacity: bool = True) -> str:
     if not source:
         return ""
     ensure_private_dir(ART_CACHE_DIR)
@@ -519,6 +533,8 @@ def art_path(config: dict[str, Any], source: str | None) -> str:
             data = response.read(ART_MAX_BYTES + 1)
         if data and len(data) <= ART_MAX_BYTES:
             atomic_bytes(target, data, maximum=ART_MAX_BYTES)
+            if enforce_capacity:
+                cleanup_cache(max_bytes=CACHE_MAX_BYTES)
             return target.as_uri()
     except (OSError, urllib.error.URLError, TimeoutError):
         pass
@@ -548,10 +564,11 @@ def compact_items(config: dict[str, Any], rows: list[dict[str, Any]]) -> list[di
     items = [compact_item(config, row, fetch_art=False) for row in rows]
     sources = [item.get("artSource", "") for item in items]
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, max(1, len(items)))) as executor:
-        artwork = list(executor.map(lambda source: art_path(config, source), sources))
+        artwork = list(executor.map(lambda source: art_path(config, source, False), sources))
     for item, thumb in zip(items, artwork):
         item["thumb"] = thumb
         item.pop("artSource", None)
+    cleanup_cache(max_bytes=CACHE_MAX_BYTES)
     return items
 
 
@@ -566,6 +583,7 @@ def cached_items(config: dict[str, Any], name: str, loader: Any) -> dict[str, An
         items = loader()
         payload = {"items": items, "stale": False, "cachedAt": int(time.time())}
         atomic_json(target, payload, maximum=DATA_MAX_BYTES)
+        cleanup_cache(max_bytes=CACHE_MAX_BYTES)
         return payload
     except PlayerError as error:
         cached = load_json(target, {}, DATA_MAX_BYTES)
@@ -724,8 +742,12 @@ def shutil_which(name: str) -> str | None:
 
 
 def stream_url(config: dict[str, Any], part: str) -> str:
-    separator = "&" if "?" in part else "?"
-    return config["server"] + part + separator + urllib.parse.urlencode({"X-Plex-Token": config["token"]})
+    return config["server"] + part
+
+
+def load_stream(config: dict[str, Any], url: str, mode: str) -> None:
+    options = {"http-header-fields": f"X-Plex-Token: {config['token']}"}
+    mpv_command(["loadfile", url, mode, -1, options])
 
 
 def state_data() -> dict[str, Any]:
@@ -892,6 +914,24 @@ def stop_timeline(config: dict[str, Any]) -> None:
         send_timeline(config, report)
 
 
+def shutdown_player(config: dict[str, Any] | None = None) -> dict[str, bool]:
+    if config is None:
+        config = load_config(False)
+    stop_timeline(config)
+    if not mpv_running():
+        return {"stopped": True}
+    try:
+        mpv_command(["quit"])
+    except OSError as error:
+        if mpv_running():
+            raise PlayerError("mpv could not be stopped.", "player-shutdown") from error
+    for _ in range(40):
+        if not mpv_running():
+            return {"stopped": True}
+        time.sleep(0.05)
+    raise PlayerError("mpv did not stop in time.", "player-shutdown")
+
+
 def public_item(item: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -931,20 +971,22 @@ def play(config: dict[str, Any], track_key: str, album_key: str | None,
         random.SystemRandom().shuffle(rest)
         queue = [selected_item] + rest
         track_key = selected_item["key"]
-    start_mpv()
     selected = next((index for index, item in enumerate(queue) if item["key"] == track_key), 0)
     queue = [*queue[selected:], *queue[:selected]]
     full_queue: list[dict[str, Any]] = []
-    for index, item in enumerate(queue):
+    urls: list[str] = []
+    for item in queue:
         detailed, part = raw_track(config, item["key"])
         full_queue.append(detailed)
         url = stream_url(config, part)
         detailed["_streamHash"] = hashlib.sha256(url.encode()).hexdigest()
-        mpv_command(["loadfile", url, "replace" if index == 0 else "append"])
-        if index == 0:
-            mpv_command(["set_property", "pause", False])
-    mpv_command(["set_property", "playlist-pos", 0])
+        urls.append(url)
     with state_lock():
+        start_mpv()
+        for index, url in enumerate(urls):
+            load_stream(config, url, "replace" if index == 0 else "append")
+        mpv_command(["set_property", "pause", False])
+        mpv_command(["set_property", "playlist-pos", 0])
         state = state_data()
         state.update({"queue": full_queue, "shuffle": shuffle})
         save_state_unlocked(state)
@@ -1006,7 +1048,7 @@ def queue_action(action: str, index: int | None = None, destination: int | None 
             url = stream_url(config, part)
             item["_streamHash"] = hashlib.sha256(url.encode()).hexdigest()
             start_mpv()
-            mpv_command(["loadfile", url, "insert-next"])
+            load_stream(config, url, "insert-next")
             queue.insert(min(len(queue), current + 1), item)
         else:
             raise PlayerError("That queue action is not available.", "invalid-queue-action")
@@ -1221,8 +1263,8 @@ def demo_dispatch(args: argparse.Namespace) -> Any:
         return {"ok": True, "code": "demo", "message": "Demo mode — no Plex connection is used.", "demo": True}
     if args.command == "cache-clean":
         return {"removed": 0, "bytes": 0, "demo": True}
-    if args.command == "logout":
-        return {"connected": False, "demo": True}
+    if args.command in ("logout", "shutdown"):
+        return {"connected": False, "stopped": True, "demo": True}
     if args.command == "queue-action":
         return demo_dispatch(argparse.Namespace(command="queue"))
     raise PlayerError("This action is not available in demo mode.", "demo")
@@ -1237,6 +1279,7 @@ def parser() -> argparse.ArgumentParser:
     login_parser.add_argument("--section", default="")
     login_parser.add_argument("--no-browser", action="store_true")
     commands.add_parser("logout", help="remove the stored Plex account token")
+    commands.add_parser("shutdown", help="stop playback and terminate the Tunarchy mpv process")
     setup = commands.add_parser("configure", help="store Plex connection details")
     setup.add_argument("--server")
     setup.add_argument("--token")
@@ -1301,6 +1344,8 @@ def main() -> int:
             return 0
         elif args.command == "status":
             result = status()
+        elif args.command == "shutdown":
+            result = shutdown_player()
         elif args.command == "recent":
             config = load_config()
             result = cached_items(config, f"recent-{args.limit}", lambda: recent(config, args.limit))

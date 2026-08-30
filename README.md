@@ -25,7 +25,8 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 - Credential-free demo mode with fictional music
 - No Python packages: the helper uses only Python's standard library
 - Plex access stored outside the plugin in a mode-`0600` config file
-- mpv IPC playback keeps the Plex token out of the process list
+- mpv IPC playback sends the Plex token as an HTTP header, keeping it out of
+  process arguments, stream URLs, and MPRIS metadata
 
 ## Requirements
 
@@ -95,7 +96,7 @@ ${XDG_CONFIG_HOME:-~/.config}/tunarchy/config.json
   actions, and inline Queue actions. Enter or Space activates a focused button.
 - Escape clears an active search, returns from a collection, or closes the
   panel. Ctrl+Space toggles play/pause from anywhere in the panel.
-- Open the keyboard map with the `?` button in the upper-right corner or `F1`;
+- Open the keyboard map with the tuna button in the upper-right corner or `F1`;
   press Escape to return to the player.
 - Hardware media keys work through MPRIS while mpv is running.
 
@@ -133,11 +134,14 @@ omarchy bar set io.github.flathack.tunarchy demoMode false --json
 
 ```bash
 omarchy plugin update io.github.flathack.tunarchy
+"${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.flathack.tunarchy/bin/tunarchy" shutdown
 omarchy plugin remove io.github.flathack.tunarchy
 ```
 
-Removing the plugin intentionally leaves connection settings and artwork cache
-in place. To remove them too, move these folders to the desktop trash:
+The `shutdown` command reports the active session as stopped and terminates the
+private mpv process. Removing the plugin intentionally leaves connection settings
+and the size-limited artwork cache in place. To remove them too, move these folders
+to the desktop trash:
 
 ```bash
 gio trash "${XDG_CONFIG_HOME:-$HOME/.config}/tunarchy"
@@ -160,7 +164,11 @@ ln -s "$PWD" "$HOME/.config/omarchy/plugins/io.github.flathack.tunarchy"
 omarchy plugin enable io.github.flathack.tunarchy --section center
 ```
 
-Files below the plugin folder hot-reload in the Omarchy shell.
+Plugin files normally reload after saving. If a change is not picked up, run:
+
+```bash
+omarchy-shell shell rescanPlugins
+```
 
 ### Brand assets
 
@@ -180,7 +188,8 @@ talks to `plex.tv`; no other third-party service is involved. See
 
 - Playback is local to this computer; this version does not remote-control a
   Plexamp client on another device.
-- Plex transcoding decisions remain under the Plex server's control.
+- Audio uses the original Plex media part directly. Tunarchy does not currently
+  request a transcoded stream.
 - The plugin implements the Plex server endpoints used by current Plex music
   libraries. Plex does not publish these endpoints as a stable public SDK.
 

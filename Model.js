@@ -14,7 +14,7 @@ function formatTime(seconds) {
 function barLabel(status) {
   if (!status || !status.configured) return "\uf1c0"
   if (!status.track || !status.track.title) return "\uf001"
-  return (status.playing ? "\uf04b  " : "\uf04c  ") + status.track.title
+  return (status.playing ? "\uf04c  " : "\uf04b  ") + status.track.title
 }
 
 function safeArray(value) {
