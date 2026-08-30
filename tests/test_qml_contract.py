@@ -55,6 +55,7 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('iconText: "?"', QML)
         self.assertIn('sequence: "F1"', QML)
         self.assertIn('text: root.helpVisible ? "Keyboard map"', QML)
+        self.assertNotIn("↑↓ Select  ·  Enter Play", QML)
 
     def test_plex_login_and_demo_mode_are_present(self):
         self.assertIn('" login"', QML)

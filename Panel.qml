@@ -1128,15 +1128,6 @@ Panel {
         }
       }
 
-      Text {
-        visible: !root.helpVisible && (root.configured || root.demoMode)
-        width: parent.width
-        text: "↑↓ Select  ·  Enter Play  ·  ⇧Enter Alt  ·  Ctrl+↑↓ Move  ·  Del Remove  ·  Esc Back"
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-      }
     }
   }
 }
