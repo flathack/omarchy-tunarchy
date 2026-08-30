@@ -25,6 +25,12 @@ Panel {
   property bool loading: false
   property int selectedIndex: 0
   property string pendingDataMode: "recent"
+  property int nextDataRequestId: 0
+  property int requestedDataRequestId: 0
+  property int activeDataRequestId: 0
+  property int queuedDataRequestId: 0
+  property string queuedDataMode: ""
+  property var queuedDataCommand: []
   property bool volumeDragging: false
   property bool suppressSearch: false
   property int pendingSelectedIndex: -1
@@ -136,13 +142,54 @@ Panel {
     }
   }
 
-  function runData(mode, command) {
-    if (dataProc.running) dataProc.running = false
+  function startData(requestId, mode, nextCommand) {
+    if (requestId !== requestedDataRequestId || activeDataRequestId !== 0) return
+    activeDataRequestId = requestId
+    pendingDataMode = mode
+    dataProc.command = nextCommand
+    dataProc.running = true
+  }
+
+  function runData(mode, nextCommand) {
+    nextDataRequestId += 1
+    requestedDataRequestId = nextDataRequestId
     pendingDataMode = mode
     loading = true
     errorText = ""
-    dataProc.command = command
-    dataProc.running = true
+
+    if (activeDataRequestId !== 0) {
+      queuedDataRequestId = requestedDataRequestId
+      queuedDataMode = mode
+      queuedDataCommand = nextCommand
+      if (dataProc.running) dataProc.running = false
+      return
+    }
+
+    startData(requestedDataRequestId, mode, nextCommand)
+  }
+
+  function finishData(exitCode, raw, rawError) {
+    var finishedRequestId = activeDataRequestId
+    var isLatest = finishedRequestId === requestedDataRequestId
+    activeDataRequestId = 0
+
+    if (isLatest) {
+      if (exitCode === 0) handleData(raw)
+      else {
+        loading = false
+        errorText = errorMessage(rawError, "Could not load the Plex library.")
+      }
+    }
+
+    if (queuedDataRequestId !== 0) {
+      var nextRequestId = queuedDataRequestId
+      var nextMode = queuedDataMode
+      var nextCommand = queuedDataCommand
+      queuedDataRequestId = 0
+      queuedDataMode = ""
+      queuedDataCommand = []
+      Qt.callLater(function() { root.startData(nextRequestId, nextMode, nextCommand) })
+    }
   }
 
   function loadView(nextView) {
@@ -416,11 +463,10 @@ Panel {
 
   Process {
     id: dataProc
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.handleData(text) }
+    stdout: StdioCollector { id: dataOutput; waitForEnd: true }
     stderr: StdioCollector { id: dataError; waitForEnd: true }
     onExited: function(exitCode) {
-      root.loading = false
-      if (exitCode !== 0) root.errorText = root.errorMessage(dataError.text, "Could not load the Plex library.")
+      root.finishData(exitCode, dataOutput.text, dataError.text)
     }
   }
 

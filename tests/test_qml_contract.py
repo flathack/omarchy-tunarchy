@@ -62,6 +62,14 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("!seekFocus.activeFocus", QML)
         self.assertIn("!volumeFocus.activeFocus", QML)
 
+    def test_rapid_tab_switches_only_apply_the_latest_request(self):
+        self.assertIn("property int requestedDataRequestId: 0", QML)
+        self.assertIn("property int activeDataRequestId: 0", QML)
+        self.assertIn("property int queuedDataRequestId: 0", QML)
+        self.assertIn("finishedRequestId === requestedDataRequestId", QML)
+        self.assertIn("root.finishData(exitCode, dataOutput.text, dataError.text)", QML)
+        self.assertNotIn("onStreamFinished: root.handleData(text)", QML)
+
     def test_complete_keyboard_navigation_contract(self):
         self.assertGreaterEqual(QML.count("focusable: true"), 15)
         self.assertGreaterEqual(QML.count("activeFocusOnTab: true"), 3)
