@@ -528,17 +528,30 @@ class PlexModelTests(unittest.TestCase):
             result = player.library_list(self.config, "albums", 5)
         self.assertEqual(len(result), 5)
 
-    def test_playback_metadata_only_loads_the_current_cover_eagerly(self):
+    def test_playback_metadata_never_loads_covers_eagerly(self):
         rows = [
             {"ratingKey": str(index), "type": "track", "title": f"Track {index}", "thumb": f"/thumb/{index}"}
             for index in range(20)
         ]
-        with mock.patch.object(player, "art_path", return_value="file:///current.jpg") as art:
+        with mock.patch.object(player, "art_path") as art:
             items = player.compact_playback_items(self.config, rows)
-        art.assert_called_once_with(self.config, "/thumb/0")
-        self.assertEqual(items[0]["thumb"], "file:///current.jpg")
+        art.assert_not_called()
+        self.assertEqual(items[0]["thumb"], "")
+        self.assertEqual(items[0]["_artSource"], "/thumb/0")
         self.assertEqual(items[1]["thumb"], "")
         self.assertEqual(items[1]["_artSource"], "/thumb/1")
+
+    def test_raw_track_keeps_artwork_lazy(self):
+        payload = {"MediaContainer": {"Metadata": [{
+            "ratingKey": "1", "type": "track", "title": "Track", "thumb": "/thumb/1",
+            "Media": [{"Part": [{"key": "/part/1"}]}],
+        }]}}
+        with mock.patch.object(player, "plex_request", return_value=payload), \
+             mock.patch.object(player, "art_path") as art:
+            item, part = player.raw_track(self.config, "1")
+        art.assert_not_called()
+        self.assertEqual(part, "/part/1")
+        self.assertEqual(item["_artSource"], "/thumb/1")
 
     def test_favorites_filters_unrated_tracks_client_side(self):
         payload = {"MediaContainer": {"Metadata": [
@@ -615,6 +628,18 @@ class PlexModelTests(unittest.TestCase):
 
 
 class AuthenticationTests(unittest.TestCase):
+    def test_server_url_is_canonical_origin_only(self):
+        self.assertEqual(player.normalize_server_url("HTTPS://plex.example:32400/"),
+                         "https://plex.example:32400")
+        self.assertEqual(player.normalize_server_url("HTTPS://PLEX.EXAMPLE:443/"),
+                         "https://plex.example")
+        self.assertEqual(player.normalize_server_url("https://[::1]:32400/"),
+                         "https://[::1]:32400")
+        for value in ("https://plex.example/base", "https://plex.example/?x=1",
+                      "https://plex.example/#fragment", "https://user@plex.example"):
+            with self.subTest(value=value), self.assertRaises(player.PlayerError):
+                player.normalize_server_url(value)
+
     def test_login_uses_pin_flow_and_saves_token_privately(self):
         responses = [
             {"id": 42, "code": "pin-code"},
@@ -868,24 +893,19 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "mpv_properties", return_value=None):
             self.assertEqual(player.queue_view()["items"], [])
 
-    def test_art_hydration_does_not_cross_account_namespace(self):
-        old = {"server": "http://plex", "token": "old", "section": "4"}
-        new = {"server": "http://plex", "token": "new", "section": "4"}
-        old_item = {"key": "1", "title": "Old", "_streamHash": "same", "_artSource": "/old"}
-        new_item = {"key": "1", "title": "New", "_streamHash": "same", "_artSource": "/new"}
-
-        def switch_account(*_):
-            player.atomic_json(player.STATE_FILE, {
-                "queue": [new_item], "queueNamespace": player.cache_namespace(new)
-            })
-            return "file:///old.jpg"
-
+    def test_status_never_blocks_on_active_artwork(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        item = {"key": "1", "title": "Track", "_streamHash": "same", "_artSource": "/cover/1"}
         player.atomic_json(player.STATE_FILE, {
-            "queue": [old_item], "queueNamespace": player.cache_namespace(old)
+            "queue": [item], "queueNamespace": player.cache_namespace(config)
         })
-        with mock.patch.object(player, "art_path", side_effect=switch_account):
-            player.hydrate_active_art(old, old_item)
-        self.assertEqual(player.state_data()["queue"], [new_item])
+        with mock.patch.object(player, "mpv_properties", return_value=None), \
+             mock.patch.object(player, "art_path") as artwork, \
+             mock.patch.object(player, "update_timeline"):
+            result = player.status(config)
+        artwork.assert_not_called()
+        self.assertEqual(result["track"]["artSource"], "/cover/1")
+        self.assertNotIn("_artSource", result["track"])
 
     def test_duplicate_queue_entries_are_reconciled_by_occurrence(self):
         digest = player.hashlib.sha256(b"http://plex/repeat").hexdigest()
@@ -977,12 +997,28 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "recover_stale_mpv_socket"), \
              mock.patch.object(player, "shutil_which", return_value="/usr/bin/mpv"), \
              mock.patch.object(player, "ensure_private_dir"), \
-             mock.patch.object(player.subprocess, "Popen", return_value=process), \
+             mock.patch.object(player.subprocess, "Popen", return_value=process) as popen, \
              mock.patch.object(player.time, "sleep"):
             with self.assertRaisesRegex(player.PlayerError, "did not start"):
                 player.start_mpv()
         process.terminate.assert_called_once()
         process.wait.assert_called_once_with(timeout=0.5)
+        self.assertEqual(popen.call_args.args[0][0], "/usr/bin/mpv")
+
+    def test_executable_lookup_rejects_relative_path_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            executable = pathlib.Path(folder) / "mpv"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            previous = os.getcwd()
+            os.chdir(folder)
+            try:
+                with mock.patch.dict(os.environ, {"PATH": ":relative"}):
+                    self.assertIsNone(player.shutil_which("mpv"))
+                with mock.patch.dict(os.environ, {"PATH": folder}):
+                    self.assertEqual(player.shutil_which("mpv"), str(executable.resolve()))
+            finally:
+                os.chdir(previous)
 
     def test_control_clamps_volume(self):
         with mock.patch.object(player, "load_config", return_value={}), \
@@ -1149,7 +1185,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.7.0")
+        self.assertEqual(manifest["version"], "0.7.1")
         self.assertIn(f'APP_VERSION = "{manifest["version"]}"', HELPER.read_text(encoding="utf-8"))
         for asset in ("tuna-brand.png", "tuna-ui-18.png", "tuna-ui-24.png", "tuna-ui-64.png"):
             self.assertTrue((ROOT / "assets" / asset).is_file())

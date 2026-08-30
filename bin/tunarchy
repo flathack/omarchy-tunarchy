@@ -38,7 +38,7 @@ SOCKET_FILE = CACHE_DIR / "mpv.sock"
 DATA_CACHE_DIR = CACHE_DIR / "data"
 ART_CACHE_DIR = CACHE_DIR / "art"
 APP_NAME = "Tunarchy"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 PLEX_AUTH_URL = "https://plex.tv/api/v2"
 TIMELINE_INTERVAL_SECONDS = 10
 CONFIG_MAX_BYTES = 64 * 1024
@@ -98,11 +98,15 @@ def normalized_origin(url: str) -> tuple[str, str, int]:
 
 def normalize_server_url(url: str) -> str:
     value = str(url).strip().rstrip("/")
-    normalized_origin(value)
+    scheme, host, port = normalized_origin(value)
     parsed = urllib.parse.urlsplit(value)
-    if parsed.query or parsed.fragment:
-        raise PlayerError("The Plex server URL cannot contain a query or fragment.", "invalid-server")
-    return value
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise PlayerError("The Plex server URL must be an origin without a path, query, or fragment.",
+                          "invalid-server")
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    suffix = "" if port == default_port else f":{port}"
+    return f"{scheme}://{display_host}{suffix}"
 
 
 class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -470,7 +474,9 @@ def login(server: str, section: str = "", no_browser: bool = False) -> dict[str,
     auth_url = "https://app.plex.tv/auth#?" + params
     print(f"Open this address to connect Tunarchy:\n{auth_url}\n", flush=True)
     if not no_browser:
-        subprocess.Popen(["xdg-open", auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        browser = shutil_which("xdg-open")
+        if browser:
+            subprocess.Popen([browser, auth_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print("Waiting for Plex sign-in…", flush=True)
     token = ""
     deadline = time.monotonic() + PLEX_LOGIN_TIMEOUT_SECONDS
@@ -775,19 +781,17 @@ def compact_items(config: dict[str, Any], rows: list[dict[str, Any]]) -> list[di
     return [compact_item(config, row, fetch_art=False) for row in rows]
 
 
+def compact_playback_item(config: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    item = compact_item(config, row, fetch_art=False)
+    source = str(item.pop("artSource", ""))
+    if source:
+        item["_artSource"] = source
+    return item
+
+
 def compact_playback_items(config: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Prepare queue metadata without blocking playback on every cover download."""
-    items = [compact_item(config, row, fetch_art=False) for row in rows]
-    first_source = str(items[0].get("artSource", "")) if items else ""
-    first_thumb = art_path(config, first_source) if first_source else ""
-    for item in items:
-        source = str(item.pop("artSource", ""))
-        item["thumb"] = first_thumb if source and source == first_source else ""
-        if source and not item["thumb"]:
-            item["_artSource"] = source
-            if source == first_source:
-                item["_artAttemptedAt"] = int(time.time())
-    return items
+    """Prepare queue metadata without delaying playback for cover downloads."""
+    return [compact_playback_item(config, row) for row in rows]
 
 
 def data_cache_path(config: dict[str, Any], name: str) -> pathlib.Path:
@@ -907,7 +911,7 @@ def raw_track(config: dict[str, Any], key: str) -> tuple[dict[str, Any], str]:
     part = media_part(row)
     if not part:
         raise PlayerError("Plex did not provide a playable file for this track.")
-    return compact_item(config, row), part
+    return compact_playback_item(config, row), part
 
 
 def mpv_commands(commands: list[list[Any]]) -> list[Any]:
@@ -1000,11 +1004,12 @@ def start_mpv() -> None:
     if mpv_running():
         return
     recover_stale_mpv_socket()
-    if not shutil_which("mpv"):
+    executable = shutil_which("mpv")
+    if not executable:
         raise PlayerError("mpv is required. Install it with: omarchy pkg add mpv")
     ensure_private_dir(CACHE_DIR)
     process = subprocess.Popen(
-        ["mpv", "--idle=yes", "--no-video", "--audio-display=no", "--keep-open=no",
+        [executable, "--idle=yes", "--no-video", "--audio-display=no", "--keep-open=no",
          "--title=Tunarchy", "--audio-client-name=Tunarchy",
          f"--input-ipc-server={SOCKET_FILE}", "--terminal=no"],
         stdin=subprocess.DEVNULL,
@@ -1030,9 +1035,15 @@ def start_mpv() -> None:
 
 def shutil_which(name: str) -> str | None:
     for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if not folder or not os.path.isabs(folder):
+            continue
         candidate = pathlib.Path(folder) / name
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return str(resolved)
     return None
 
 
@@ -1281,41 +1292,10 @@ def shutdown_player(config: dict[str, Any] | None = None, report_timeline: bool 
 def public_item(item: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
-    return {key: value for key, value in item.items() if not key.startswith("_")}
-
-
-def hydrate_active_art(config: dict[str, Any], item: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not item or item.get("thumb") or not item.get("_artSource") or not config:
-        return item
-    if time.time() - float(item.get("_artAttemptedAt", 0) or 0) < 300:
-        return item
-    updated = dict(item)
-    updated["thumb"] = art_path(config, str(item["_artSource"]))
-    updated["_artAttemptedAt"] = int(time.time())
-    if updated["thumb"]:
-        updated.pop("_artSource", None)
-        updated.pop("_artAttemptedAt", None)
-    expected_namespace = cache_namespace(config)
-    with state_lock():
-        state = state_data()
-        if str(state.get("queueNamespace", "")) != expected_namespace:
-            return updated
-        queue = state.get("queue", [])
-        for index, candidate in enumerate(queue if isinstance(queue, list) else []):
-            if isinstance(candidate, dict) and candidate.get("_streamHash") == item.get("_streamHash") \
-                    and candidate.get("key") == item.get("key") \
-                    and candidate.get("_artSource") == item.get("_artSource"):
-                refreshed = dict(candidate)
-                refreshed["thumb"] = updated.get("thumb", "")
-                refreshed["_artAttemptedAt"] = updated.get("_artAttemptedAt", int(time.time()))
-                if refreshed["thumb"]:
-                    refreshed.pop("_artSource", None)
-                    refreshed.pop("_artAttemptedAt", None)
-                queue[index] = refreshed
-                state["queue"] = queue
-                save_state_unlocked(state)
-                break
-    return updated
+    visible = {key: value for key, value in item.items() if not key.startswith("_")}
+    if not visible.get("thumb") and item.get("_artSource"):
+        visible["artSource"] = str(item["_artSource"])
+    return visible
 
 
 def reconcile_queue(queue: list[dict[str, Any]], playlist: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1639,7 +1619,7 @@ def status(config: dict[str, Any] | None = None, force_timeline: bool = False) -
     state = sync_queue_from_mpv(config, snapshot.get("playlist") if snapshot else None, snapshot is not None)
     queue = state.get("queue", []) if isinstance(state, dict) else []
     if snapshot is None:
-        track = hydrate_active_art(config, queue[0] if queue else None)
+        track = queue[0] if queue else None
         result = {"configured": configured, "playing": False, "paused": False,
                   "track": public_item(track),
                   "position": 0, "duration": (track.get("duration", 0) if track else 0), "volume": 100,
@@ -1650,7 +1630,6 @@ def status(config: dict[str, Any] | None = None, force_timeline: bool = False) -
         track = queue[index] if isinstance(queue, list) and 0 <= index < len(queue) else None
         if track is None and bool(snapshot.get("idle-active")) and isinstance(queue, list) and queue:
             track = queue[0]
-        track = hydrate_active_art(config, track)
         paused = bool(snapshot.get("pause"))
         result = {
             "configured": configured,

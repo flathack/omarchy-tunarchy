@@ -37,7 +37,12 @@ Panel {
   property var pendingActions: []
   property var pendingQueueEdits: []
   property var pendingArtwork: []
+  property var requestedArtwork: ({})
+  property var resolvedArtwork: ({})
+  property var resolvedArtworkOrder: []
   property string activeArtwork: ""
+  property int artworkGeneration: 0
+  property int activeArtworkGeneration: 0
 
   readonly property var navigation: [
     { id: "recent", label: "Home", icon: "\uf015" },
@@ -73,7 +78,7 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property var activeTrack: player && player.track ? player.track : null
-  readonly property string activeThumb: activeTrack ? String(activeTrack.thumb || "") : ""
+  readonly property string activeThumb: activeTrack ? artworkThumb(activeTrack) : ""
   readonly property bool configured: player && player.configured === true
   readonly property bool demoMode: setting("demoMode", false) === true
   readonly property bool navigationShortcutsEnabled: opened && (configured || demoMode)
@@ -110,7 +115,8 @@ Panel {
   function errorMessage(raw, fallback) {
     var value = String(raw || "").trim()
     var parsed = parseJson(value, null)
-    return parsed && parsed.message ? String(parsed.message) : (value || fallback)
+    var message = parsed && parsed.message ? String(parsed.message) : (value || fallback)
+    return message.length > 400 ? message.slice(0, 397) + "…" : message
   }
 
   function refreshStatus() {
@@ -136,6 +142,7 @@ Panel {
     if (parsed) {
       var wasConfigured = configured
       player = parsed
+      if (parsed.track) requestArtwork(parsed.track.artSource)
       if (opened && !wasConfigured && (parsed.configured === true || demoMode) && items.length === 0 && !loading)
         loadView("recent")
     }
@@ -153,6 +160,7 @@ Panel {
     requestedDataRequestId = nextDataRequestId
     loading = true
     errorText = ""
+    invalidateArtworkJobs()
 
     if (activeDataRequestId !== 0) {
       queuedDataRequestId = requestedDataRequestId
@@ -270,7 +278,6 @@ Panel {
     loading = false
     if (!parsed) { errorText = "Plex returned unreadable data."; return }
     items = Model.safeArray(parsed.items)
-    pendingArtwork = []
     if (parsed.stale === true) errorText = parsed.warning || "Showing cached library data while Plex is offline."
     selectedIndex = pendingSelectedIndex >= 0
       ? Math.max(0, Math.min(items.length - 1, pendingSelectedIndex)) : 0
@@ -359,16 +366,35 @@ Panel {
   function requestArtwork(source) {
     var value = String(source || "")
     if (value === "" || value.indexOf("/") !== 0 || value.indexOf("//") === 0) return
-    if (activeArtwork === value || pendingArtwork.indexOf(value) >= 0) return
+    if (resolvedArtwork[value]) return
+    var lastAttempt = Number(requestedArtwork[value] || 0)
+    if (Date.now() - lastAttempt < 60000) return
     if (pendingArtwork.length >= 32) return
-    pendingArtwork = pendingArtwork.concat([value])
+    var attempts = Object.assign({}, requestedArtwork)
+    attempts[value] = Date.now()
+    requestedArtwork = attempts
+    pendingArtwork = pendingArtwork.concat([{ source: value, generation: artworkGeneration }])
     startNextArtwork()
+  }
+
+  function invalidateArtworkJobs() {
+    artworkGeneration += 1
+    pendingArtwork = []
+    requestedArtwork = ({})
+    if (artProc.running) artProc.running = false
+    else {
+      activeArtwork = ""
+      activeArtworkGeneration = 0
+    }
   }
 
   function startNextArtwork() {
     if (artProc.running || activeArtwork !== "" || pendingArtwork.length === 0) return
-    activeArtwork = pendingArtwork[0]
+    var job = pendingArtwork[0]
     pendingArtwork = pendingArtwork.slice(1)
+    if (!job || job.generation !== artworkGeneration) { Qt.callLater(startNextArtwork); return }
+    activeArtwork = String(job.source || "")
+    activeArtworkGeneration = Number(job.generation)
     artProc.command = command(["art", activeArtwork])
     artProc.running = true
   }
@@ -377,18 +403,21 @@ Panel {
     var parsed = parseJson(raw, null)
     var thumb = parsed && parsed.thumb ? String(parsed.thumb) : ""
     if (thumb === "") return
-    var changed = false
-    var nextItems = []
-    for (var index = 0; index < items.length; index++) {
-      var item = items[index]
-      if (String(item.artSource || "") === source) {
-        var updated = Object.assign({}, item)
-        updated.thumb = thumb
-        nextItems.push(updated)
-        changed = true
-      } else nextItems.push(item)
+    var cache = Object.assign({}, resolvedArtwork)
+    var order = resolvedArtworkOrder.filter(function(entry) { return entry !== source })
+    cache[source] = thumb
+    order.push(source)
+    while (order.length > 128) {
+      var expired = order.shift()
+      delete cache[expired]
     }
-    if (changed) items = nextItems
+    resolvedArtwork = cache
+    resolvedArtworkOrder = order
+  }
+
+  function artworkThumb(item) {
+    if (!item) return ""
+    return String(item.thumb || resolvedArtwork[String(item.artSource || "")] || "")
   }
 
   function advanceProgress() {
@@ -506,7 +535,12 @@ Panel {
 
   Process {
     id: statusProc
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyStatus(text) }
+    stdout: StdioCollector { id: statusOutput; waitForEnd: true }
+    stderr: StdioCollector { id: statusError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.applyStatus(statusOutput.text)
+      else if (root.opened) root.errorText = root.errorMessage(statusError.text, "Could not refresh player status.")
+    }
   }
 
   Process {
@@ -529,19 +563,26 @@ Panel {
     stdout: StdioCollector { id: artOutput; waitForEnd: true }
     onExited: function(exitCode) {
       var source = root.activeArtwork
-      if (exitCode === 0) root.applyArtwork(source, artOutput.text)
+      var generation = root.activeArtworkGeneration
+      if (exitCode === 0 && generation === root.artworkGeneration) root.applyArtwork(source, artOutput.text)
       root.activeArtwork = ""
+      root.activeArtworkGeneration = 0
       Qt.callLater(root.startNextArtwork)
     }
   }
 
   Process {
     id: healthProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var parsed = root.parseJson(text, null)
+    stdout: StdioCollector { id: healthOutput; waitForEnd: true }
+    stderr: StdioCollector { id: healthError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        var parsed = root.parseJson(healthOutput.text, null)
         if (parsed) root.health = parsed
+      } else {
+        var message = root.errorMessage(healthError.text, "Could not check the Plex connection.")
+        root.health = ({ ok: false, code: "helper-error", message: message })
+        if (root.opened) root.errorText = message
       }
     }
   }
@@ -704,7 +745,7 @@ Panel {
           Image {
             id: headerCover
             anchors.fill: parent
-            source: root.activeTrack ? root.activeTrack.thumb || "" : ""
+            source: root.activeThumb
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             sourceSize.width: Math.max(1, Math.round(width * 2))
@@ -1244,7 +1285,7 @@ Panel {
               clip: true
               Image {
                 anchors.fill: parent
-                source: mediaRow.modelData.thumb || ""
+                source: root.artworkThumb(mediaRow.modelData)
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 sourceSize.width: Math.max(1, Math.round(width * 2))

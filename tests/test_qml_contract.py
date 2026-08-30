@@ -108,10 +108,29 @@ class QmlContractTests(unittest.TestCase):
 
     def test_artwork_is_lazy_bounded_and_decode_limited(self):
         self.assertIn('command(["art", activeArtwork])', QML)
-        self.assertIn("pendingArtwork.indexOf(value)", QML)
         self.assertIn("pendingArtwork.length >= 32", QML)
+        self.assertIn("property int artworkGeneration: 0", QML)
+        self.assertIn("requestedArtwork[value]", QML)
+        self.assertIn("if (artProc.running) artProc.running = false", QML)
+        self.assertIn("generation === root.artworkGeneration", QML)
+        self.assertIn("resolvedArtworkOrder", QML)
+        self.assertIn("while (order.length > 128)", QML)
+        self.assertIn("root.artworkThumb(mediaRow.modelData)", QML)
+        self.assertNotIn("var nextItems = []", QML)
         self.assertGreaterEqual(QML.count("sourceSize.width:"), 3)
         self.assertIn("maximumLength: 256", QML)
+
+    def test_status_and_health_process_errors_are_visible(self):
+        self.assertIn("id: statusError", QML)
+        self.assertIn("id: healthError", QML)
+        self.assertIn('"Could not refresh player status."', QML)
+        self.assertIn('code: "helper-error"', QML)
+        self.assertIn("message.length > 400", QML)
+
+    def test_active_artwork_uses_async_frontend_pipeline(self):
+        self.assertIn("if (parsed.track) requestArtwork(parsed.track.artSource)", QML)
+        self.assertIn("activeTrack ? artworkThumb(activeTrack)", QML)
+        self.assertIn("source: root.activeThumb", QML)
 
     def test_complete_keyboard_navigation_contract(self):
         self.assertGreaterEqual(QML.count("focusable: true"), 15)
