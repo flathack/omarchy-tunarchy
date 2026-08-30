@@ -190,6 +190,8 @@ talks to `plex.tv`; no other third-party service is involved. See
   Plexamp client on another device.
 - Audio uses the original Plex media part directly. Tunarchy does not currently
   request a transcoded stream.
+- Playback queues are capped at 500 tracks. When a larger collection is started
+  from a selected track, the queue continues from that track and wraps around.
 - The plugin implements the Plex server endpoints used by current Plex music
   libraries. Plex does not publish these endpoints as a stable public SDK.
 
