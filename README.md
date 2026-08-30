@@ -17,6 +17,7 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
   previous, and next
 - Shuffle, repeat-all, and repeat-one
 - MPRIS integration for hardware media keys and desktop media controls
+- Plex Dashboard integration with live play, pause, progress, track, and stop updates
 - Actionable offline, authentication, DNS, library, and server error states
 - Concurrent artwork loading, bounded private cache, and offline last-good data
 - Native Omarchy/Quickshell styling with top, bottom, and vertical bar support
@@ -172,9 +173,9 @@ The generated Tuna artwork is stored in four transparent PNG variants:
 
 ## Privacy and limitations
 
-Library requests, cover downloads, and audio streams go directly to the Plex
-server configured by the user. The browser sign-in talks to `plex.tv`; no
-other third-party service is involved. See
+Library requests, cover downloads, audio streams, and playback timeline updates
+go directly to the Plex server configured by the user. The browser sign-in
+talks to `plex.tv`; no other third-party service is involved. See
 [SECURITY.md](SECURITY.md) for credential handling details.
 
 - Playback is local to this computer; this version does not remote-control a

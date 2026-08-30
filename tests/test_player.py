@@ -8,6 +8,7 @@ import pathlib
 import stat
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 
@@ -399,6 +400,85 @@ class PlayerTests(unittest.TestCase):
         self.assertTrue(result["demo"])
         self.assertEqual({item["type"] for item in result["items"]}, {"artist"})
 
+    def test_timeline_request_posts_player_identity_and_position(self):
+        response = mock.MagicMock(status=200)
+        context = mock.MagicMock()
+        context.__enter__.return_value = response
+        config = {"server": "http://plex", "token": "secret", "clientIdentifier": "client-1"}
+        report = {"sessionId": "session-1", "trackKey": "42", "state": "playing",
+                  "positionMs": 1234, "durationMs": 5678}
+        with mock.patch.object(player.urllib.request, "urlopen", return_value=context) as urlopen:
+            self.assertTrue(player.send_timeline(config, report))
+        request = urlopen.call_args.args[0]
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(request.data, b"")
+        self.assertEqual(query["ratingKey"], ["42"])
+        self.assertEqual(query["state"], ["playing"])
+        self.assertEqual(query["time"], ["1234"])
+        self.assertEqual(headers["x-plex-client-identifier"], "client-1")
+        self.assertEqual(headers["x-plex-session-identifier"], "session-1")
+        self.assertEqual(headers["x-plex-product"], "Tunarchy")
+        self.assertNotIn("X-Plex-Token", request.full_url)
+
+    def test_timeline_is_throttled_and_pause_is_immediate(self):
+        config = {"server": "http://plex", "token": "secret", "clientIdentifier": "client-1"}
+        playing = {"playing": True, "paused": False, "track": {"key": "42"},
+                   "position": 1.0, "duration": 10.0}
+        paused = {**playing, "playing": False, "paused": True, "position": 2.0}
+        with mock.patch.object(player, "send_timeline", return_value=True) as send, \
+             mock.patch.object(player.uuid, "uuid4", return_value="session-1"), \
+             mock.patch.object(player.time, "time", side_effect=(100, 100, 105, 106, 106, 111)):
+            player.update_timeline(config, playing)
+            player.update_timeline(config, {**playing, "position": 1.5})
+            player.update_timeline(config, paused)
+            player.update_timeline(config, paused)
+        self.assertEqual([call.args[1]["state"] for call in send.call_args_list],
+                         ["playing", "paused"])
+        self.assertEqual({call.args[1]["sessionId"] for call in send.call_args_list}, {"session-1"})
+
+    def test_timeline_reports_playback_progress_every_ten_seconds(self):
+        config = {"server": "http://plex", "token": "secret", "clientIdentifier": "client-1"}
+        playing = {"playing": True, "paused": False, "track": {"key": "42"},
+                   "position": 1.0, "duration": 30.0}
+        with mock.patch.object(player, "send_timeline", return_value=True) as send, \
+             mock.patch.object(player.uuid, "uuid4", return_value="session-1"), \
+             mock.patch.object(player.time, "time", side_effect=(100, 100, 111, 111)):
+            player.update_timeline(config, playing)
+            player.update_timeline(config, {**playing, "position": 12.0})
+        self.assertEqual([call.args[1]["positionMs"] for call in send.call_args_list], [1000, 12000])
+
+    def test_track_change_stops_old_session_and_starts_a_new_one(self):
+        config = {"server": "http://plex", "token": "secret", "clientIdentifier": "client-1"}
+        first = {"playing": True, "paused": False, "track": {"key": "1"},
+                 "position": 9.0, "duration": 10.0}
+        second = {"playing": True, "paused": False, "track": {"key": "2"},
+                  "position": 0.2, "duration": 20.0}
+        with mock.patch.object(player, "send_timeline", return_value=True) as send, \
+             mock.patch.object(player.uuid, "uuid4", side_effect=("session-1", "session-2")), \
+             mock.patch.object(player.time, "time", side_effect=(100, 100, 101, 101)):
+            player.update_timeline(config, first)
+            player.update_timeline(config, second)
+        reports = [call.args[1] for call in send.call_args_list]
+        self.assertEqual([(row["trackKey"], row["state"]) for row in reports],
+                         [("1", "playing"), ("1", "stopped"), ("2", "playing")])
+        self.assertEqual(reports[-1]["sessionId"], "session-2")
+
+    def test_stop_clears_timeline_without_interrupting_on_network_error(self):
+        config = {"server": "http://plex", "token": "secret", "clientIdentifier": "client-1"}
+        playing = {"playing": True, "paused": False, "track": {"key": "42"},
+                   "position": 1.0, "duration": 10.0}
+        stopped = {**playing, "playing": False, "paused": False, "position": 4.0}
+        with mock.patch.object(player, "send_timeline", return_value=False) as send, \
+             mock.patch.object(player.uuid, "uuid4", return_value="session-1"), \
+             mock.patch.object(player.time, "time", side_effect=(100, 100, 101, 101)):
+            player.update_timeline(config, playing)
+            player.update_timeline(config, stopped)
+        self.assertEqual(send.call_args_list[-1].args[1]["state"], "stopped")
+        self.assertEqual(send.call_args_list[-1].args[1]["positionMs"], 4000)
+        self.assertNotIn("timeline", player.state_data())
+
 
 class RepositoryContractTests(unittest.TestCase):
     def test_manifest_and_entry_point(self):
@@ -407,7 +487,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.4.6")
+        self.assertEqual(manifest["version"], "0.5.0")
         for asset in ("tuna-brand.png", "tuna-ui-18.png", "tuna-ui-24.png", "tuna-ui-64.png"):
             self.assertTrue((ROOT / "assets" / asset).is_file())
         self.assertTrue((ROOT / "preview.png").is_file())
