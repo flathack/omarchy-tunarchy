@@ -88,7 +88,8 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('width: root.helpVisible ? Style.space(64) : Style.space(46)', QML)
         self.assertNotIn('iconText: "?"', QML)
         self.assertIn('sequence: "F1"', QML)
-        self.assertIn('text: root.helpVisible ? "Keyboard map"', QML)
+        self.assertIn('text: root.helpVisible ? "Tunarchy"', QML)
+        self.assertIn('text: root.helpVisible ? "Keyboard map · Every control works without a mouse"', QML)
         self.assertNotIn("↑↓ Select  ·  Enter Play", QML)
 
     def test_plex_login_and_demo_mode_are_present(self):

@@ -639,7 +639,7 @@ Panel {
 
           Text {
             Layout.fillWidth: true
-            text: root.helpVisible ? "Keyboard map" : (root.activeTrack ? root.activeTrack.title : "Tunarchy")
+            text: root.helpVisible ? "Tunarchy" : (root.activeTrack ? root.activeTrack.title : "Tunarchy")
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
@@ -649,7 +649,7 @@ Panel {
 
           Text {
             Layout.fillWidth: true
-            text: root.helpVisible ? "Every control works without a mouse"
+            text: root.helpVisible ? "Keyboard map · Every control works without a mouse"
               : (root.activeTrack ? Model.subtitle(root.activeTrack) : (root.configured ? "Choose something to play" : "Connect your Plex server"))
             color: root.dim
             font.family: root.fontFamily

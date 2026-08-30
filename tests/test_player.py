@@ -407,7 +407,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.4.5")
+        self.assertEqual(manifest["version"], "0.4.6")
         for asset in ("tuna-brand.png", "tuna-ui-18.png", "tuna-ui-24.png", "tuna-ui-64.png"):
             self.assertTrue((ROOT / "assets" / asset).is_file())
         self.assertTrue((ROOT / "preview.png").is_file())

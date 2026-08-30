@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.flathack.tunarchy",
   "name": "Tunarchy",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "author": "flathack",
   "license": "MIT",
   "description": "Browse and play a Plex music library from the Omarchy bar.",
