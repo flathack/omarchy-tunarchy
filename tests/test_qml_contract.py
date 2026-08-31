@@ -94,6 +94,13 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("pendingQueueEdits.length >= 16", QML)
         self.assertNotIn("if (actionProc.running) return", QML)
 
+    def test_volume_updates_optimistically_while_the_slider_moves(self):
+        self.assertIn("function setVolume(value)", QML)
+        self.assertIn("updated.volume = next", QML)
+        self.assertIn("onMoved: function(next) { root.setVolume(next) }", QML)
+        self.assertIn("volumeSlider.dragging ? volumeSlider.liveValue", QML)
+        self.assertNotIn("property bool volumeDragging", QML)
+
     def test_status_polling_is_adaptive(self):
         self.assertIn("root.opened ? 3000", QML)
         self.assertIn("root.player && root.player.playing ? 10000", QML)

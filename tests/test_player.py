@@ -1026,8 +1026,23 @@ class PlayerTests(unittest.TestCase):
              mock.patch.object(player, "mpv_command") as command, \
              mock.patch.object(player, "status", return_value={"volume": 130}):
             result = player.control("volume", 999)
-        command.assert_called_once_with(["set_property", "volume", 130], True)
+        self.assertIn(mock.call(["set_property", "volume", 130], True), command.call_args_list)
         self.assertEqual(result["volume"], 130)
+        self.assertEqual(player.state_data()["volume"], 130)
+
+    def test_stopped_player_remembers_volume_for_status_and_resume(self):
+        config = {"server": "http://plex", "token": "tok", "section": "4"}
+        player.atomic_json(player.STATE_FILE, {
+            "queue": [{"key": "1", "_part": "/part/1"}],
+            "queueNamespace": player.cache_namespace(config),
+            "volume": 42,
+        })
+        with mock.patch.object(player, "load_config", return_value=config), \
+             mock.patch.object(player, "mpv_properties", return_value=None), \
+             mock.patch.object(player, "update_timeline"):
+            result = player.control("volume", 37)
+        self.assertEqual(result["volume"], 37)
+        self.assertEqual(player.state_data()["volume"], 37)
 
     def test_unconfigured_status_does_not_start_player(self):
         with mock.patch.object(player, "load_config", return_value={}), \
