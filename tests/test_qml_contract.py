@@ -105,6 +105,17 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("volumeSlider.dragging ? volumeSlider.liveValue", QML)
         self.assertNotIn("property bool volumeDragging", QML)
 
+    def test_volume_defaults_to_system_output_with_player_option(self):
+        self.assertIn("import Quickshell.Services.Pipewire", QML)
+        self.assertIn('setting("volumeMode", "System")', QML)
+        self.assertIn('volumeSink.audio.volume = next / 100', QML)
+        self.assertIn('control("volume", next)', QML)
+        self.assertIn('["omarchy", "bar", "set", moduleName, "volumeMode"', QML)
+        self.assertIn('command: ["omarchy-audio-output-sink"]', QML)
+        self.assertIn('Accessible.role: Accessible.RadioButton', QML)
+        self.assertIn('label: "System"', QML)
+        self.assertIn('label: "Plex"', QML)
+
     def test_status_polling_is_adaptive(self):
         self.assertIn("root.opened ? 3000", QML)
         self.assertIn("root.player && root.player.playing ? 10000", QML)
@@ -162,7 +173,7 @@ class QmlContractTests(unittest.TestCase):
         self.assertNotIn('iconText: "?"', QML)
         self.assertIn('sequence: "F1"', QML)
         self.assertIn('text: root.helpVisible ? "Tunarchy"', QML)
-        self.assertIn('text: root.helpVisible ? "Keyboard map · Every control works without a mouse"', QML)
+        self.assertIn('text: root.helpVisible ? "Help · Keyboard map and player settings"', QML)
         self.assertNotIn("↑↓ Select  ·  Enter Play", QML)
 
     def test_plex_login_and_demo_mode_are_present(self):

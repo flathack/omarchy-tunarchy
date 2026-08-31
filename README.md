@@ -13,8 +13,8 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 - Artist → album → track and playlist → track navigation
 - Album/playlist play and shuffle actions
 - Manageable queue with play, reorder, remove, and clear-upcoming actions
-- Album cover in the bar and player, progress, seek, 0–130% volume, play/pause,
-  previous, and next
+- Album cover in the bar and player, progress, seek, play/pause, previous, and next
+- System output volume by default, with optional 0–130% local player volume
 - Shuffle, repeat-all, and repeat-one
 - MPRIS integration for hardware media keys and desktop media controls
 - Plex Dashboard integration with live play, pause, progress, track, and stop updates
@@ -103,8 +103,10 @@ ${XDG_CONFIG_HOME:-~/.config}/tunarchy/config.json
   actions, and inline Queue actions. Enter or Space activates a focused button.
 - Escape clears an active search, returns from a collection, or closes the
   panel. Ctrl+Space toggles play/pause from anywhere in the panel.
-- Open the keyboard map with the tuna button in the upper-right corner or `F1`;
-  press Escape to return to the player.
+- Open help and settings with the tuna button in the upper-right corner or `F1`.
+  Select **System** to control Omarchy's current audio output (the default), or
+  **Plex** to change only Tunarchy's local mpv player volume. Press Escape to
+  return to the player.
 - Hardware media keys work through MPRIS while mpv is running.
 
 The CLI is also useful for troubleshooting:
@@ -125,6 +127,7 @@ Plugin settings are exposed through Omarchy's schema:
 ```bash
 omarchy bar set io.github.flathack.tunarchy recentAlbumCount 30
 omarchy bar set io.github.flathack.tunarchy libraryItemCount 150
+omarchy bar set io.github.flathack.tunarchy volumeMode System
 ```
 
 ### Demo mode

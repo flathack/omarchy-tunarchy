@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Pipewire
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -42,6 +43,8 @@ Panel {
   property string activeArtwork: ""
   property int artworkGeneration: 0
   property int activeArtworkGeneration: 0
+  property string volumeSinkName: ""
+  property string volumeModeOverride: ""
 
   readonly property var navigation: [
     { id: "recent", label: "Home", icon: "\uf015" },
@@ -80,8 +83,53 @@ Panel {
   readonly property string activeThumb: activeTrack ? artworkThumb(activeTrack) : ""
   readonly property bool configured: player && player.configured === true
   readonly property bool demoMode: setting("demoMode", false) === true
+  readonly property var audioSink: Pipewire.defaultAudioSink
+  readonly property var audioNodes: Pipewire.nodes ? Pipewire.nodes.values : []
+  readonly property var candidateAudioSinks: {
+    var list = []
+    for (var index = 0; index < audioNodes.length; index++) {
+      var node = audioNodes[index]
+      if (node && node.isSink && !node.isStream) list.push(node)
+    }
+    return list
+  }
+  readonly property var volumeSink: {
+    if (volumeSinkName === "" || !audioSink || volumeSinkName === String(audioSink.name)) return audioSink
+    for (var index = 0; index < audioNodes.length; index++) {
+      var node = audioNodes[index]
+      if (node && node.isSink && !node.isStream && String(node.name) === volumeSinkName && node.audio)
+        return node
+    }
+    return audioSink
+  }
+  readonly property string configuredVolumeMode: normalizeVolumeMode(setting("volumeMode", "System"))
+  readonly property string volumeMode: volumeModeOverride || configuredVolumeMode
+  readonly property real systemVolume: volumeSink && volumeSink.audio
+    ? Math.max(0, Math.min(100, Number(volumeSink.audio.volume) * 100)) : 0
+  readonly property real displayedVolume: volumeMode === "system"
+    ? systemVolume : Math.max(0, Math.min(130, Number(player.volume) || 0))
+  readonly property real volumeMaximum: volumeMode === "system" ? 100 : 130
+  readonly property bool volumeAvailable: volumeMode !== "system" || !!(volumeSink && volumeSink.audio)
   readonly property bool navigationShortcutsEnabled: opened && (configured || demoMode)
     && !helpVisible && !searchField.activeFocus && !seekFocus.activeFocus && !volumeFocus.activeFocus
+
+  onAudioSinkChanged: resolveVolumeSink()
+
+  function normalizeVolumeMode(value) {
+    return String(value || "").toLowerCase() === "plex" ? "plex" : "system"
+  }
+
+  function resolveVolumeSink() {
+    if (!volumeSinkProc.running) volumeSinkProc.running = true
+  }
+
+  function selectVolumeMode(mode) {
+    var next = normalizeVolumeMode(mode)
+    volumeModeOverride = next
+    volumeModeProc.command = ["omarchy", "bar", "set", moduleName, "volumeMode", next === "plex" ? "Plex" : "System"]
+    if (!volumeModeProc.running) volumeModeProc.running = true
+    if (next === "system") resolveVolumeSink()
+  }
 
   function command(args) {
     var result = [helperPath]
@@ -309,7 +357,16 @@ Panel {
   }
 
   function setVolume(value) {
-    var next = Math.max(0, Math.min(130, Number(value) || 0))
+    var next = Math.max(0, Math.min(volumeMaximum, Number(value) || 0))
+    if (volumeMode === "system") {
+      if (!volumeSink || !volumeSink.audio) {
+        errorText = "The system audio output is not available."
+        return
+      }
+      volumeSink.audio.volume = next / 100
+      if (bar && bar.shell) bar.shell.summon("omarchy.osd", JSON.stringify({ icon: "\uf028", value: Math.round(next) }))
+      return
+    }
     var updated = Object.assign({}, player)
     updated.volume = next
     player = updated
@@ -550,6 +607,28 @@ Panel {
     }
   }
 
+  PwObjectTracker { objects: root.candidateAudioSinks }
+
+  Process {
+    id: volumeSinkProc
+    command: ["omarchy-audio-output-sink"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.volumeSinkName = String(text).trim()
+    }
+  }
+
+  Process {
+    id: volumeModeProc
+    stderr: StdioCollector { id: volumeModeError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.volumeModeOverride = ""
+        root.errorText = root.errorMessage(volumeModeError.text, "Could not save the volume preference.")
+      }
+    }
+  }
+
   Process {
     id: queueEditProc
     stderr: StdioCollector { id: queueEditError; waitForEnd: true }
@@ -625,6 +704,14 @@ Panel {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refreshStatus()
+  }
+
+  Timer {
+    interval: 15000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.resolveVolumeSink()
   }
 
   Timer {
@@ -796,7 +883,7 @@ Panel {
 
           Text {
             Layout.fillWidth: true
-            text: root.helpVisible ? "Keyboard map · Every control works without a mouse"
+            text: root.helpVisible ? "Help · Keyboard map and player settings"
               : (root.activeTrack ? Model.subtitle(root.activeTrack) : (root.configured ? "Choose something to play" : "Connect your Plex server"))
             color: root.dim
             font.family: root.fontFamily
@@ -875,17 +962,18 @@ Panel {
               color: activeFocus ? Style.focusFillFor(root.foreground, Color.accent) : "transparent"
               borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent) : Border.none()
               activeFocusOnTab: true
+              enabled: root.volumeAvailable
               Accessible.role: Accessible.Slider
-              Accessible.name: "Volume"
+              Accessible.name: root.volumeMode === "system" ? "System volume" : "Plex player volume"
               Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Left || event.key === Qt.Key_Down) {
-                  root.setVolume(Math.max(0, Number(root.player.volume) - 5)); event.accepted = true
+                  root.setVolume(Math.max(0, root.displayedVolume - 5)); event.accepted = true
                 } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up) {
-                  root.setVolume(Math.min(130, Number(root.player.volume) + 5)); event.accepted = true
+                  root.setVolume(Math.min(root.volumeMaximum, root.displayedVolume + 5)); event.accepted = true
                 } else if (event.key === Qt.Key_Home) {
                   root.setVolume(0); event.accepted = true
                 } else if (event.key === Qt.Key_End) {
-                  root.setVolume(130); event.accepted = true
+                  root.setVolume(root.volumeMaximum); event.accepted = true
                 }
               }
 
@@ -894,16 +982,17 @@ Panel {
                 anchors.fill: parent
                 anchors.margins: Style.space(2)
                 bar: root.bar
-                value: Number(root.player.volume) || 0
+                value: root.displayedVolume
                 minimum: 0
-                maximum: 130
+                maximum: root.volumeMaximum
                 step: 5
                 integer: true
                 onMoved: function(next) { root.setVolume(next) }
               }
             }
             Text {
-              text: Math.round(volumeSlider.dragging ? volumeSlider.liveValue : Number(root.player.volume) || 0) + "%"
+              text: root.volumeAvailable
+                ? Math.round(volumeSlider.dragging ? volumeSlider.liveValue : root.displayedVolume) + "%" : "N/A"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -918,7 +1007,7 @@ Panel {
           Layout.alignment: Qt.AlignTop
           size: Style.space(28)
           iconText: ""
-          tooltipText: root.helpVisible ? "Close keyboard help" : "Keyboard help"
+          tooltipText: root.helpVisible ? "Close help and settings" : "Help and settings"
           foreground: root.foreground
           fontFamily: root.fontFamily
           fontSize: Style.font.body
@@ -959,6 +1048,81 @@ Panel {
           anchors.leftMargin: Style.space(10)
           anchors.rightMargin: Style.space(10)
           spacing: Style.space(4)
+
+          Text {
+            width: helpColumn.width
+            text: "Volume control"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+
+          Row {
+            width: helpColumn.width
+            height: Style.space(32)
+            spacing: Style.space(6)
+
+            Repeater {
+              model: [
+                { value: "system", label: "System", icon: "\uf028" },
+                { value: "plex", label: "Plex", icon: "\uf001" }
+              ]
+              delegate: BorderSurface {
+                required property var modelData
+                width: (helpColumn.width - Style.space(6)) / 2
+                height: Style.space(32)
+                radius: Style.cornerRadius
+                color: activeFocus
+                  ? Style.focusFillFor(root.foreground, Color.accent)
+                  : (root.volumeMode === modelData.value
+                    ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+                borderSpec: activeFocus
+                  ? Border.controlSpec("focus", root.foreground, Color.accent)
+                  : Border.controlSpec(root.volumeMode === modelData.value ? "hover-cursor" : "normal", root.foreground, Color.accent)
+                activeFocusOnTab: true
+                enabled: !volumeModeProc.running
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: modelData.label + " volume"
+                Accessible.checked: root.volumeMode === modelData.value
+                Keys.onReturnPressed: root.selectVolumeMode(modelData.value)
+                Keys.onEnterPressed: root.selectVolumeMode(modelData.value)
+                Keys.onSpacePressed: root.selectVolumeMode(modelData.value)
+
+                Text {
+                  anchors.centerIn: parent
+                  text: parent.modelData.icon + "  " + parent.modelData.label
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: root.volumeMode === parent.modelData.value
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: parent.enabled
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    parent.forceActiveFocus()
+                    root.selectVolumeMode(parent.modelData.value)
+                  }
+                }
+              }
+            }
+          }
+
+          Text {
+            width: helpColumn.width
+            text: root.volumeMode === "system"
+              ? "The slider changes Omarchy's current audio output."
+              : "The slider changes only Tunarchy's local mpv player."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Item { width: 1; height: Style.space(4) }
 
           Repeater {
             model: root.keyboardHelp

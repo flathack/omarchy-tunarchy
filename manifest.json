@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.flathack.tunarchy",
   "name": "Tunarchy",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "author": "flathack",
   "license": "MIT",
   "description": "Browse and play a Plex music library from the Omarchy bar.",
@@ -21,7 +21,8 @@
     "defaults": {
       "recentAlbumCount": 20,
       "libraryItemCount": 100,
-      "demoMode": false
+      "demoMode": false,
+      "volumeMode": "System"
     },
     "schema": [
       {
@@ -50,6 +51,14 @@
         "label": "Demo mode",
         "defaultValue": false,
         "description": "Show fictional music and never contact Plex or start mpv."
+      },
+      {
+        "key": "volumeMode",
+        "type": "enum",
+        "label": "Volume control",
+        "options": ["System", "Plex"],
+        "defaultValue": "System",
+        "description": "Choose whether the player slider changes the Omarchy system output or Tunarchy's local mpv volume."
       }
     ]
   }

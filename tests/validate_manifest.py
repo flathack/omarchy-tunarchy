@@ -36,7 +36,10 @@ require(len(keys) == len(schema) == len(set(keys)), "setting keys must be unique
 defaults = widget.get("defaults")
 require(isinstance(defaults, dict) and set(defaults) == set(keys), "defaults and schema keys must match")
 for row in schema:
-    require(row.get("type") in ("boolean", "integer", "number", "string"), f"invalid type for {row.get('key')}")
+    require(row.get("type") in ("boolean", "integer", "number", "string", "enum"), f"invalid type for {row.get('key')}")
+    if row.get("type") == "enum":
+        require(isinstance(row.get("options"), list) and len(row["options"]) >= 2, f"enum options missing for {row.get('key')}")
+        require(row.get("defaultValue") in row["options"], f"enum default is not an option for {row.get('key')}")
     require(row.get("defaultValue") == defaults[row["key"]], f"default mismatch for {row['key']}")
 
 print("manifest.json: valid")
