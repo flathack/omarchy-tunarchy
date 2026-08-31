@@ -31,6 +31,13 @@ test("top-level and search states produce executable helper arguments", () => {
                    ["search", "tuna", "--limit", "35"]);
 });
 
+test("active or paused playback opens on the queue", () => {
+  assert.equal(model.defaultView({ playing: true, paused: false }), "queue");
+  assert.equal(model.defaultView({ playing: false, paused: true }), "queue");
+  assert.equal(model.defaultView({ playing: false, paused: false, track: { title: "Saved" } }), "recent");
+  assert.equal(model.defaultView(null), "recent");
+});
+
 test("transport actions queue while sliders coalesce to the newest intent", () => {
   const helper = "/plugin/bin/tunarchy";
   const previous = [

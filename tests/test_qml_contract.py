@@ -55,6 +55,10 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('"play-next"', QML)
         self.assertGreaterEqual(QML.count("items[selectedIndex].current === true"), 2)
 
+    def test_opening_during_playback_defaults_to_the_queue(self):
+        self.assertIn("loadView(Model.defaultView(player))", QML)
+        self.assertIn("function defaultView(status)", MODEL)
+
     def test_arrow_keys_switch_library_tabs(self):
         self.assertIn('sequence: "Left"', QML)
         self.assertIn('sequence: "Right"', QML)
@@ -93,6 +97,13 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("MAX_PENDING_ACTIONS = 8", MODEL)
         self.assertIn("pendingQueueEdits.length >= 16", QML)
         self.assertNotIn("if (actionProc.running) return", QML)
+
+    def test_volume_updates_optimistically_while_the_slider_moves(self):
+        self.assertIn("function setVolume(value)", QML)
+        self.assertIn("updated.volume = next", QML)
+        self.assertIn("onMoved: function(next) { root.setVolume(next) }", QML)
+        self.assertIn("volumeSlider.dragging ? volumeSlider.liveValue", QML)
+        self.assertNotIn("property bool volumeDragging", QML)
 
     def test_status_polling_is_adaptive(self):
         self.assertIn("root.opened ? 3000", QML)

@@ -30,7 +30,6 @@ Panel {
   property int queuedDataRequestId: 0
   property string queuedDataMode: ""
   property var queuedDataCommand: []
-  property bool volumeDragging: false
   property bool suppressSearch: false
   property int pendingSelectedIndex: -1
   property bool helpVisible: false
@@ -96,7 +95,7 @@ Panel {
     controller.show()
     refreshStatus()
     refreshHealth()
-    if (configured || demoMode) loadView("recent")
+    if (configured || demoMode) loadView(Model.defaultView(player))
     Qt.callLater(searchField.forceActiveFocus)
   }
 
@@ -307,6 +306,14 @@ Panel {
     var args = ["control", action]
     if (value !== undefined) args.push(String(value))
     runAction(command(args))
+  }
+
+  function setVolume(value) {
+    var next = Math.max(0, Math.min(130, Number(value) || 0))
+    var updated = Object.assign({}, player)
+    updated.volume = next
+    player = updated
+    control("volume", next)
   }
 
   function connectPlex() {
@@ -872,13 +879,13 @@ Panel {
               Accessible.name: "Volume"
               Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Left || event.key === Qt.Key_Down) {
-                  root.control("volume", Math.max(0, Number(root.player.volume) - 5)); event.accepted = true
+                  root.setVolume(Math.max(0, Number(root.player.volume) - 5)); event.accepted = true
                 } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up) {
-                  root.control("volume", Math.min(130, Number(root.player.volume) + 5)); event.accepted = true
+                  root.setVolume(Math.min(130, Number(root.player.volume) + 5)); event.accepted = true
                 } else if (event.key === Qt.Key_Home) {
-                  root.control("volume", 0); event.accepted = true
+                  root.setVolume(0); event.accepted = true
                 } else if (event.key === Qt.Key_End) {
-                  root.control("volume", 130); event.accepted = true
+                  root.setVolume(130); event.accepted = true
                 }
               }
 
@@ -892,12 +899,11 @@ Panel {
                 maximum: 130
                 step: 5
                 integer: true
-                onMoved: function(next) { root.volumeDragging = true }
-                onReleased: function(next) { root.volumeDragging = false; root.control("volume", next) }
+                onMoved: function(next) { root.setVolume(next) }
               }
             }
             Text {
-              text: Math.round(root.volumeDragging ? volumeSlider.liveValue : Number(root.player.volume) || 0) + "%"
+              text: Math.round(volumeSlider.dragging ? volumeSlider.liveValue : Number(root.player.volume) || 0) + "%"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

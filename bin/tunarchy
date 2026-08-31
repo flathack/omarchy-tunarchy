@@ -1073,6 +1073,7 @@ def state_data() -> dict[str, Any]:
     state.setdefault("queue", [])
     state.setdefault("shuffle", False)
     state.setdefault("repeat", "off")
+    state.setdefault("volume", 100)
     return state
 
 
@@ -1080,7 +1081,7 @@ def state_for_config(config: dict[str, Any], state: dict[str, Any] | None = None
     candidate = state if isinstance(state, dict) else state_data()
     namespace = str(candidate.get("queueNamespace", ""))
     if not config or not namespace or namespace != cache_namespace(config):
-        fresh = {"queue": [], "shuffle": False, "repeat": "off"}
+        fresh = {"queue": [], "shuffle": False, "repeat": "off", "volume": 100}
         if config:
             fresh["queueNamespace"] = cache_namespace(config)
         return fresh
@@ -1452,6 +1453,7 @@ def activate_queue(config: dict[str, Any], queue: list[dict[str, Any]], urls: li
             mode = str(candidate.get("repeat", "off"))
             mpv_command(["set_property", "loop-file", "inf" if mode == "one" else "no"], True)
             mpv_command(["set_property", "loop-playlist", "inf" if mode == "all" else "no"], True)
+            mpv_command(["set_property", "volume", max(0, min(130, safe_float(candidate.get("volume"), 100)))], True)
             mpv_command(["set_property", "pause", False], True)
             mpv_command(["set_property", "playlist-pos", 0], True)
             with state_lock():
@@ -1622,7 +1624,8 @@ def status(config: dict[str, Any] | None = None, force_timeline: bool = False) -
         track = queue[0] if queue else None
         result = {"configured": configured, "playing": False, "paused": False,
                   "track": public_item(track),
-                  "position": 0, "duration": (track.get("duration", 0) if track else 0), "volume": 100,
+                  "position": 0, "duration": (track.get("duration", 0) if track else 0),
+                  "volume": max(0, min(130, safe_float(state.get("volume"), 100))),
                   "shuffle": bool(state.get("shuffle")), "repeat": state.get("repeat", "off"),
                   "queueLength": len(queue), "queueIndex": -1}
     else:
@@ -1654,6 +1657,13 @@ def control(action: str, value: float | None = None) -> dict[str, Any]:
     if player_state is None:
         if action == "toggle":
             return resume_queue(config)
+        if action == "volume" and value is not None:
+            with state_lock():
+                state = state_for_config(config)
+                next_state = dict(state)
+                next_state["volume"] = max(0, min(130, value))
+                next_state["updated"] = int(time.time())
+                atomic_bytes(STATE_FILE, json_bytes(next_state, STATE_MAX_BYTES), maximum=STATE_MAX_BYTES)
         return status(config)
     if action == "toggle" and bool(player_state.get("idle-active")):
         return resume_queue(config)
@@ -1673,7 +1683,21 @@ def control_running(config: dict[str, Any], action: str, value: float | None = N
     elif action == "seek" and value is not None:
         mpv_command(["set_property", "time-pos", max(0, value)], True)
     elif action == "volume" and value is not None:
-        mpv_command(["set_property", "volume", max(0, min(130, value))], True)
+        volume = max(0, min(130, value))
+        with state_lock():
+            state = state_for_config(config)
+            next_state = dict(state)
+            next_state["volume"] = volume
+            next_state["updated"] = int(time.time())
+            payload = json_bytes(next_state, STATE_MAX_BYTES)
+            previous = property_or("volume", safe_float(state.get("volume"), 100))
+            try:
+                mpv_command(["set_property", "volume", volume], True)
+                atomic_bytes(STATE_FILE, payload, maximum=STATE_MAX_BYTES)
+            except Exception:
+                with contextlib.suppress(OSError, PlayerError, json.JSONDecodeError):
+                    mpv_command(["set_property", "volume", previous], True)
+                raise
     elif action == "shuffle":
         with state_lock():
             state = state_for_config(config)
@@ -1684,16 +1708,15 @@ def control_running(config: dict[str, Any], action: str, value: float | None = N
             json_bytes(next_state, STATE_MAX_BYTES)
             snapshot = player_snapshot(state)
             try:
-                if enabled:
-                    mpv_command(["playlist-shuffle"], True)
-                    playlist = mpv_command(["get_property", "playlist"], True)
-                    stored_queue = state.get("queue", [])
-                    reordered = reconcile_queue(
-                        stored_queue if isinstance(stored_queue, list) else [],
-                        playlist if isinstance(playlist, list) else [],
-                    )
-                    if len(reordered) == len(state.get("queue", [])):
-                        next_state["queue"] = reordered
+                mpv_command(["playlist-shuffle" if enabled else "playlist-unshuffle"], True)
+                playlist = mpv_command(["get_property", "playlist"], True)
+                stored_queue = state.get("queue", [])
+                reordered = reconcile_queue(
+                    stored_queue if isinstance(stored_queue, list) else [],
+                    playlist if isinstance(playlist, list) else [],
+                )
+                if len(reordered) == len(state.get("queue", [])):
+                    next_state["queue"] = reordered
                 payload = json_bytes(next_state, STATE_MAX_BYTES)
                 atomic_bytes(STATE_FILE, payload, maximum=STATE_MAX_BYTES)
             except Exception:

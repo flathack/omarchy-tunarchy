@@ -31,6 +31,10 @@ function subtitle(item) {
   return artist || album
 }
 
+function defaultView(status) {
+  return status && (status.playing === true || status.paused === true) ? "queue" : "recent"
+}
+
 function navigationState(view, key, kind, title, query, selectedIndex) {
   return {
     view: String(view || "recent"),
