@@ -95,7 +95,7 @@ Panel {
     controller.show()
     refreshStatus()
     refreshHealth()
-    if (configured || demoMode) loadView("recent")
+    if (configured || demoMode) loadView(Model.defaultView(player))
     Qt.callLater(searchField.forceActiveFocus)
   }
 
