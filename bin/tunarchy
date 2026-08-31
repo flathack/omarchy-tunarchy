@@ -1708,16 +1708,15 @@ def control_running(config: dict[str, Any], action: str, value: float | None = N
             json_bytes(next_state, STATE_MAX_BYTES)
             snapshot = player_snapshot(state)
             try:
-                if enabled:
-                    mpv_command(["playlist-shuffle"], True)
-                    playlist = mpv_command(["get_property", "playlist"], True)
-                    stored_queue = state.get("queue", [])
-                    reordered = reconcile_queue(
-                        stored_queue if isinstance(stored_queue, list) else [],
-                        playlist if isinstance(playlist, list) else [],
-                    )
-                    if len(reordered) == len(state.get("queue", [])):
-                        next_state["queue"] = reordered
+                mpv_command(["playlist-shuffle" if enabled else "playlist-unshuffle"], True)
+                playlist = mpv_command(["get_property", "playlist"], True)
+                stored_queue = state.get("queue", [])
+                reordered = reconcile_queue(
+                    stored_queue if isinstance(stored_queue, list) else [],
+                    playlist if isinstance(playlist, list) else [],
+                )
+                if len(reordered) == len(state.get("queue", [])):
+                    next_state["queue"] = reordered
                 payload = json_bytes(next_state, STATE_MAX_BYTES)
                 atomic_bytes(STATE_FILE, payload, maximum=STATE_MAX_BYTES)
             except Exception:
