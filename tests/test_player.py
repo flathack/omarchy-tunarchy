@@ -667,6 +667,65 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(result["code"], "timeout")
         self.assertFalse(result["ok"])
 
+    def test_disabled_connection_is_preserved_but_blocked(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"):
+            player.atomic_json(player.CONFIG_FILE, {
+                "server": "http://plex:32400", "token": "secret", "connectionEnabled": False,
+            })
+            self.assertEqual(player.load_config(False), {})
+            preserved = player.load_config(False, include_disabled=True)
+            self.assertEqual(preserved["token"], "secret")
+            with self.assertRaisesRegex(player.PlayerError, "turned off") as raised:
+                player.load_config()
+        self.assertEqual(raised.exception.code, "disconnected")
+
+    def test_disabled_health_check_never_contacts_plex(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"), \
+             mock.patch.object(player, "sections") as sections:
+            player.atomic_json(player.CONFIG_FILE, {
+                "server": "http://plex:32400", "token": "secret", "connectionEnabled": False,
+            })
+            result = player.connection_health()
+        sections.assert_not_called()
+        self.assertTrue(result["configured"])
+        self.assertFalse(result["connected"])
+        self.assertEqual(result["code"], "disconnected")
+
+    def test_connection_switch_keeps_credentials_and_queue(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"), \
+             mock.patch.object(player, "STATE_FILE", pathlib.Path(folder) / "state.json"), \
+             mock.patch.object(player, "SOCKET_FILE", pathlib.Path(folder) / "mpv.sock"), \
+             mock.patch.object(player, "shutdown_player") as shutdown:
+            config = {"server": "http://plex:32400", "token": "secret", "section": "4"}
+            player.atomic_json(player.CONFIG_FILE, config)
+            player.atomic_json(player.STATE_FILE, {
+                "queue": [{"key": "1", "title": "Saved track"}],
+                "queueNamespace": player.cache_namespace(config),
+            })
+            disabled = player.set_connection(False)
+            stored = player.load_settings()
+            self.assertEqual(stored["token"], "secret")
+            self.assertFalse(stored["connectionEnabled"])
+            self.assertTrue(player.STATE_FILE.exists())
+            self.assertFalse(disabled["connected"])
+            shutdown.assert_called_once()
+
+            enabled = player.set_connection(True)
+            self.assertTrue(player.load_settings()["connectionEnabled"])
+            self.assertTrue(enabled["connected"])
+
+    def test_disabled_connection_blocks_timeline_network_request(self):
+        config = {
+            "server": "http://plex:32400", "token": "secret", "connectionEnabled": False,
+        }
+        report = {"trackKey": "1", "sessionId": "session", "state": "playing"}
+        with mock.patch.object(player, "safe_urlopen") as request:
+            self.assertFalse(player.send_timeline(config, report))
+        request.assert_not_called()
+
     def test_logout_clears_persisted_queue_metadata(self):
         with tempfile.TemporaryDirectory() as folder, \
              mock.patch.object(player, "CONFIG_FILE", pathlib.Path(folder) / "config.json"), \
@@ -1236,7 +1295,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["version"], "0.9.0")
         self.assertIn(f'APP_VERSION = "{manifest["version"]}"', HELPER.read_text(encoding="utf-8"))
         for asset in ("tuna-brand.png", "tuna-ui-18.png", "tuna-ui-24.png", "tuna-ui-64.png"):
             self.assertTrue((ROOT / "assets" / asset).is_file())

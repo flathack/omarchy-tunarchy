@@ -13,7 +13,7 @@ Panel {
   moduleName: "io.github.flathack.tunarchy"
   ipcTarget: "io.github.flathack.tunarchy"
 
-  property var player: ({ configured: false, playing: false, track: null, position: 0, duration: 0, volume: 100, shuffle: false, repeat: "off" })
+  property var player: ({ configured: false, connected: false, playing: false, track: null, position: 0, duration: 0, volume: 100, shuffle: false, repeat: "off" })
   property var items: []
   property var health: ({ ok: false, code: "unconfigured", message: "Connect your Plex account to start listening." })
   property var backStack: []
@@ -45,6 +45,7 @@ Panel {
   property int activeArtworkGeneration: 0
   property string volumeSinkName: ""
   property string volumeModeOverride: ""
+  property bool disconnecting: false
 
   readonly property var navigation: [
     { id: "recent", label: "Home", icon: "\uf015" },
@@ -80,9 +81,10 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property var activeTrack: player && player.track ? player.track : null
-  readonly property string activeThumb: activeTrack ? artworkThumb(activeTrack) : ""
+  readonly property string activeThumb: plexConnected && activeTrack ? artworkThumb(activeTrack) : ""
   readonly property bool configured: player && player.configured === true
   readonly property bool demoMode: setting("demoMode", false) === true
+  readonly property bool plexConnected: demoMode || (configured && player.connected !== false)
   readonly property var audioSink: Pipewire.defaultAudioSink
   readonly property var audioNodes: Pipewire.nodes ? Pipewire.nodes.values : []
   readonly property var candidateAudioSinks: {
@@ -110,7 +112,7 @@ Panel {
     ? systemVolume : Math.max(0, Math.min(130, Number(player.volume) || 0))
   readonly property real volumeMaximum: volumeMode === "system" ? 100 : 130
   readonly property bool volumeAvailable: volumeMode !== "system" || !!(volumeSink && volumeSink.audio)
-  readonly property bool navigationShortcutsEnabled: opened && (configured || demoMode)
+  readonly property bool navigationShortcutsEnabled: opened && plexConnected
     && !helpVisible && !searchField.activeFocus && !seekFocus.activeFocus && !volumeFocus.activeFocus
 
   onAudioSinkChanged: resolveVolumeSink()
@@ -143,7 +145,7 @@ Panel {
     controller.show()
     refreshStatus()
     refreshHealth()
-    if (configured || demoMode) loadView(Model.defaultView(player))
+    if (plexConnected) loadView(Model.defaultView(player))
     Qt.callLater(searchField.forceActiveFocus)
   }
 
@@ -167,16 +169,22 @@ Panel {
   }
 
   function refreshStatus() {
+    if (disconnecting) return
     statusProc.command = command(["status"])
     if (!statusProc.running) statusProc.running = true
   }
 
   function refreshHealth() {
+    if (disconnecting) return
     healthProc.command = command(["health"])
     if (!healthProc.running) healthProc.running = true
   }
 
   function retryCurrent() {
+    if (health.code === "disconnected") {
+      setConnection(true)
+      return
+    }
     refreshHealth()
     if (view === "queue") runData("queue", command(["queue"]))
     else if (view === "children") runData("children", command(["children", currentParentKind, currentParentKey]))
@@ -187,12 +195,37 @@ Panel {
   function applyStatus(raw) {
     var parsed = parseJson(raw, null)
     if (parsed) {
-      var wasConfigured = configured
+      var wasConnected = plexConnected
       player = parsed
-      if (parsed.track) requestArtwork(parsed.track.artSource)
-      if (opened && !wasConfigured && (parsed.configured === true || demoMode) && items.length === 0 && !loading)
+      if (parsed.track && (parsed.connected !== false || demoMode)) requestArtwork(parsed.track.artSource)
+      if (opened && !wasConnected && (parsed.connected !== false || demoMode) && items.length === 0 && !loading)
         loadView("recent")
     }
+  }
+
+  function setConnection(enabled) {
+    if (connectionProc.running || !configured || demoMode) return
+    errorText = ""
+    if (!enabled) {
+      disconnecting = true
+      requestedDataRequestId += 1
+      activeDataRequestId = 0
+      queuedDataRequestId = 0
+      loading = false
+      items = []
+      query = ""
+      pendingActions = []
+      pendingQueueEdits = []
+      if (dataProc.running) dataProc.running = false
+      if (artProc.running) artProc.running = false
+      if (actionProc.running) actionProc.running = false
+      if (queueEditProc.running) queueEditProc.running = false
+      if (healthProc.running) healthProc.running = false
+      if (statusProc.running) statusProc.running = false
+      invalidateArtworkJobs()
+    }
+    connectionProc.command = command(["connection", enabled ? "on" : "off"])
+    connectionProc.running = true
   }
 
   function startData(requestId, mode, nextCommand) {
@@ -545,7 +578,7 @@ Panel {
   }
 
   function switchNavigation(delta) {
-    if ((!configured && !demoMode) || navigation.length === 0) return
+    if (!plexConnected || navigation.length === 0) return
     var activeView = view
     if (view === "children" && backStack.length > 0) activeView = backStack[0].view
     var current = 0
@@ -573,7 +606,7 @@ Panel {
   Shortcut {
     sequence: "Ctrl+Space"
     context: Qt.ApplicationShortcut
-    enabled: root.opened && (root.activeTrack !== null || Number(root.player.queueLength || 0) > 0)
+    enabled: root.opened && root.plexConnected && (root.activeTrack !== null || Number(root.player.queueLength || 0) > 0)
     onActivated: root.control("toggle")
   }
 
@@ -602,6 +635,7 @@ Panel {
     stdout: StdioCollector { id: statusOutput; waitForEnd: true }
     stderr: StdioCollector { id: statusError; waitForEnd: true }
     onExited: function(exitCode) {
+      if (root.disconnecting) return
       if (exitCode === 0) root.applyStatus(statusOutput.text)
       else if (root.opened) root.errorText = root.errorMessage(statusError.text, "Could not refresh player status.")
     }
@@ -633,6 +667,7 @@ Panel {
     id: queueEditProc
     stderr: StdioCollector { id: queueEditError; waitForEnd: true }
     onExited: function(exitCode) {
+      if (root.disconnecting) return
       if (exitCode !== 0) root.errorText = root.errorMessage(queueEditError.text, "Could not update the queue.")
       root.refreshStatus()
       if (root.view === "queue") root.runData("queue", root.command(["queue"]))
@@ -662,6 +697,7 @@ Panel {
     stdout: StdioCollector { id: healthOutput; waitForEnd: true }
     stderr: StdioCollector { id: healthError; waitForEnd: true }
     onExited: function(exitCode) {
+      if (root.disconnecting) return
       if (exitCode === 0) {
         var parsed = root.parseJson(healthOutput.text, null)
         if (parsed) root.health = parsed
@@ -669,6 +705,25 @@ Panel {
         var message = root.errorMessage(healthError.text, "Could not check the Plex connection.")
         root.health = ({ ok: false, code: "helper-error", message: message })
         if (root.opened) root.errorText = message
+      }
+    }
+  }
+
+  Process {
+    id: connectionProc
+    stdout: StdioCollector { id: connectionOutput; waitForEnd: true }
+    stderr: StdioCollector { id: connectionError; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.disconnecting = false
+      if (exitCode === 0) {
+        root.applyStatus(connectionOutput.text)
+        var parsed = root.parseJson(connectionOutput.text, {})
+        if (parsed.warning) root.errorText = String(parsed.warning)
+        root.refreshHealth()
+      } else {
+        root.errorText = root.errorMessage(connectionError.text, "Could not change the Plex connection.")
+        root.refreshStatus()
+        root.refreshHealth()
       }
     }
   }
@@ -687,6 +742,7 @@ Panel {
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyStatus(text) }
     stderr: StdioCollector { id: actionError; waitForEnd: true }
     onExited: function(exitCode) {
+      if (root.disconnecting) return
       if (exitCode !== 0) root.errorText = root.errorMessage(actionError.text, "Player action failed.")
       root.refreshStatus()
       if (root.view === "queue") root.runData("queue", root.command(["queue"]))
@@ -740,9 +796,9 @@ Panel {
     bar: root.bar
     labelVisible: false
     hasVisualContent: true
-    fixedWidth: vertical ? -1 : (root.activeTrack ? Style.space(180) : Style.bar.iconSlot)
+    fixedWidth: vertical ? -1 : (root.plexConnected && root.activeTrack ? Style.space(180) : Style.bar.iconSlot)
     fixedHeight: vertical ? Style.bar.iconSlot : -1
-    tooltipText: root.activeTrack
+    tooltipText: !root.plexConnected && root.configured ? "Tunarchy · Plex connection off" : root.activeTrack
       ? root.activeTrack.title + (Model.subtitle(root.activeTrack) ? " · " + Model.subtitle(root.activeTrack) : "")
       : "Tunarchy"
     active: root.player && root.player.playing === true
@@ -796,7 +852,7 @@ Panel {
       }
 
       Text {
-        visible: root.activeTrack !== null && !button.vertical
+        visible: root.plexConnected && root.activeTrack !== null && !button.vertical
         width: Math.max(0, parent.width - coverFrame.width - parent.spacing)
         anchors.verticalCenter: parent.verticalCenter
         text: root.activeTrack ? root.activeTrack.title : ""
@@ -815,8 +871,8 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: true
-    focusTarget: root.helpVisible ? helpButton : (root.configured || root.demoMode)
-      ? (root.view === "queue" ? itemList : searchField) : connectButton
+    focusTarget: root.helpVisible ? helpButton : root.plexConnected
+      ? (root.view === "queue" ? itemList : searchField) : (root.configured ? connectionButton : connectButton)
     contentWidth: fittedContentWidth(Style.space(540))
     contentHeight: fittedContentHeight(contentColumn.implicitHeight, Style.space(790))
 
@@ -873,7 +929,7 @@ Panel {
 
           Text {
             Layout.fillWidth: true
-            text: root.helpVisible ? "Tunarchy" : (root.activeTrack ? root.activeTrack.title : "Tunarchy")
+            text: root.helpVisible || !root.plexConnected ? "Tunarchy" : (root.activeTrack ? root.activeTrack.title : "Tunarchy")
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
@@ -884,7 +940,8 @@ Panel {
           Text {
             Layout.fillWidth: true
             text: root.helpVisible ? "Help · Keyboard map and player settings"
-              : (root.activeTrack ? Model.subtitle(root.activeTrack) : (root.configured ? "Choose something to play" : "Connect your Plex server"))
+              : (!root.plexConnected && root.configured ? "Plex connection is off"
+              : (root.activeTrack ? Model.subtitle(root.activeTrack) : (root.configured ? "Choose something to play" : "Connect your Plex server")))
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -892,7 +949,7 @@ Panel {
           }
 
           RowLayout {
-            visible: root.activeTrack !== null && !root.helpVisible
+            visible: root.activeTrack !== null && root.plexConnected && !root.helpVisible
             Layout.fillWidth: true
             spacing: Style.space(8)
 
@@ -944,7 +1001,7 @@ Panel {
           }
 
           RowLayout {
-            visible: root.activeTrack !== null && !root.helpVisible
+            visible: root.activeTrack !== null && root.plexConnected && !root.helpVisible
             Layout.fillWidth: true
             spacing: Style.space(8)
 
@@ -1000,6 +1057,25 @@ Panel {
               horizontalAlignment: Text.AlignRight
             }
           }
+        }
+
+        PanelActionButton {
+          id: connectionButton
+          visible: root.configured && !root.demoMode && !root.helpVisible
+          Layout.alignment: Qt.AlignTop
+          size: Style.space(28)
+          iconText: "\uf011"
+          tooltipText: root.plexConnected ? "Disconnect from Plex" : "Connect to Plex"
+          foreground: root.plexConnected ? root.foreground : Color.urgent
+          fontFamily: root.fontFamily
+          fontSize: Style.font.body
+          bordered: true
+          focusable: true
+          enabled: !connectionProc.running && !root.disconnecting
+          Accessible.role: Accessible.Button
+          Accessible.name: tooltipText
+          Accessible.description: "Keeps the saved Plex account and server settings"
+          onClicked: root.setConnection(!root.plexConnected)
         }
 
         PanelActionButton {
@@ -1162,7 +1238,7 @@ Panel {
       }
 
       Row {
-        visible: root.activeTrack !== null && !root.helpVisible
+        visible: root.activeTrack !== null && root.plexConnected && !root.helpVisible
         width: parent.width
         spacing: Style.space(16)
 
@@ -1245,7 +1321,9 @@ Panel {
             wrapMode: Text.WordWrap
           }
           PanelActionButton {
-            iconText: "\uf2f1"; tooltipText: "Retry"; foreground: root.foreground; fontFamily: root.fontFamily
+            iconText: root.health.code === "disconnected" ? "\uf011" : "\uf2f1"
+            tooltipText: root.health.code === "disconnected" ? "Connect to Plex" : "Retry"
+            foreground: root.foreground; fontFamily: root.fontFamily
             focusable: true; Accessible.name: tooltipText
             onClicked: root.retryCurrent()
           }
@@ -1259,7 +1337,7 @@ Panel {
       }
 
       Flickable {
-        visible: !root.helpVisible && (root.configured || root.demoMode)
+        visible: !root.helpVisible && root.plexConnected
         width: parent.width
         height: Style.space(38)
         contentWidth: navRow.implicitWidth
@@ -1309,7 +1387,7 @@ Panel {
 
       TextField {
         id: searchField
-        visible: !root.helpVisible && (root.configured || root.demoMode) && root.view !== "queue"
+        visible: !root.helpVisible && root.plexConnected && root.view !== "queue"
         width: parent.width
         placeholderText: "Search Plex…"
         Accessible.name: "Search Plex music"
@@ -1330,7 +1408,7 @@ Panel {
       }
 
       RowLayout {
-        visible: !root.helpVisible && (root.configured || root.demoMode)
+        visible: !root.helpVisible && root.plexConnected
         width: parent.width
 
         PanelActionButton {
@@ -1392,7 +1470,7 @@ Panel {
       }
 
       Text {
-        visible: !root.helpVisible && (root.configured || root.demoMode) && !root.loading && root.errorText === "" && root.items.length === 0
+        visible: !root.helpVisible && root.plexConnected && !root.loading && root.errorText === "" && root.items.length === 0
         width: parent.width
         text: root.view === "search" ? "No matches." : "Nothing here yet."
         color: root.dim
@@ -1403,7 +1481,7 @@ Panel {
 
       ListView {
         id: itemList
-        visible: !root.helpVisible && (root.configured || root.demoMode) && root.items.length > 0
+        visible: !root.helpVisible && root.plexConnected && root.items.length > 0
         width: parent.width
         height: Math.min(contentHeight, Style.space(330))
         spacing: Style.space(5)

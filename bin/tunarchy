@@ -38,7 +38,7 @@ SOCKET_FILE = CACHE_DIR / "mpv.sock"
 DATA_CACHE_DIR = CACHE_DIR / "data"
 ART_CACHE_DIR = CACHE_DIR / "art"
 APP_NAME = "Tunarchy"
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 PLEX_AUTH_URL = "https://plex.tv/api/v2"
 TIMELINE_INTERVAL_SECONDS = 10
 CONFIG_MAX_BYTES = 64 * 1024
@@ -342,13 +342,21 @@ def client_identifier() -> str:
     return identifier
 
 
-def load_config(required: bool = True) -> dict[str, Any]:
+def connection_enabled(config: dict[str, Any]) -> bool:
+    return config.get("connectionEnabled") is not False
+
+
+def load_config(required: bool = True, include_disabled: bool = False) -> dict[str, Any]:
     data = load_settings()
     if not isinstance(data, dict) or not data.get("server") or not data.get("token"):
         if required:
             raise PlayerError("Connect Tunarchy to Plex first.", "unconfigured")
         return {}
     data["server"] = normalize_server_url(str(data["server"]))
+    if not include_disabled and not connection_enabled(data):
+        if required:
+            raise PlayerError("The Plex connection is turned off.", "disconnected")
+        return {}
     return data
 
 
@@ -450,7 +458,8 @@ def replace_account(candidate: dict[str, Any]) -> None:
     candidate = dict(candidate)
     candidate["server"] = normalize_server_url(str(candidate.get("server", "")))
     candidate.setdefault("clientIdentifier", client_identifier())
-    previous = load_config(False)
+    candidate["connectionEnabled"] = True
+    previous = load_config(False, include_disabled=True)
     if previous and cache_namespace(previous) != cache_namespace(candidate):
         shutdown_player(previous)
         secure_unlink(STATE_FILE)
@@ -514,6 +523,33 @@ def logout() -> dict[str, Any]:
         return {"connected": False, "stopped": True}
     except PlayerError as error:
         return {"connected": False, "stopped": False, "warning": str(error), "code": error.code}
+
+
+def set_connection(enabled: bool) -> dict[str, Any]:
+    config = load_config(False, include_disabled=True)
+    if not config:
+        raise PlayerError("Connect Tunarchy to Plex first.", "unconfigured")
+    if enabled:
+        config = save_settings({"connectionEnabled": True})
+        config["server"] = normalize_server_url(str(config["server"]))
+        return status(config)
+
+    warnings = []
+    try:
+        stop_timeline(config)
+    except PlayerError as error:
+        warnings.append(str(error))
+    save_settings({"connectionEnabled": False})
+    disabled_config = dict(config)
+    disabled_config["connectionEnabled"] = False
+    try:
+        shutdown_player(disabled_config, report_timeline=False)
+    except PlayerError as error:
+        warnings.append(str(error))
+    result = status(disabled_config)
+    if warnings:
+        result.update({"warning": " ".join(warnings), "code": "player-shutdown"})
+    return result
 
 
 def metadata(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1169,7 +1205,8 @@ def send_timeline(config: dict[str, Any], report: dict[str, Any]) -> bool:
     """Best-effort Plex Dashboard reporting; reporting must never break playback."""
     track_key = str(report.get("trackKey", ""))
     session_identifier = str(report.get("sessionId", ""))
-    if not config.get("server") or not config.get("token") or not track_key or not session_identifier:
+    if not connection_enabled(config) or not config.get("server") or not config.get("token") \
+            or not track_key or not session_identifier:
         return False
     position_ms = max(0, safe_int(report.get("positionMs")))
     duration_ms = max(0, safe_int(report.get("durationMs")))
@@ -1197,7 +1234,7 @@ def send_timeline(config: dict[str, Any], report: dict[str, Any]) -> bool:
 
 
 def update_timeline(config: dict[str, Any], snapshot: dict[str, Any], force: bool = False) -> None:
-    if not config.get("server") or not config.get("token"):
+    if not connection_enabled(config) or not config.get("server") or not config.get("token"):
         return
     track = snapshot.get("track") if isinstance(snapshot.get("track"), dict) else None
     track_key = str(track.get("key", "")) if track else ""
@@ -1257,7 +1294,7 @@ def update_timeline(config: dict[str, Any], snapshot: dict[str, Any], force: boo
 
 
 def stop_timeline(config: dict[str, Any]) -> None:
-    if not config.get("server") or not config.get("token"):
+    if not connection_enabled(config) or not config.get("server") or not config.get("token"):
         return
     report = None
     with state_lock():
@@ -1273,8 +1310,8 @@ def stop_timeline(config: dict[str, Any]) -> None:
 
 def shutdown_player(config: dict[str, Any] | None = None, report_timeline: bool = True) -> dict[str, bool]:
     if config is None:
-        config = load_config(False)
-    if report_timeline:
+        config = load_config(False, include_disabled=True)
+    if report_timeline and connection_enabled(config):
         stop_timeline(config)
     if not mpv_running():
         return {"stopped": True}
@@ -1614,15 +1651,16 @@ def property_or(name: str, fallback: Any) -> Any:
 
 
 def status(config: dict[str, Any] | None = None, force_timeline: bool = False) -> dict[str, Any]:
-    config = config or load_config(False)
+    config = config if config is not None else load_config(False, include_disabled=True)
     configured = bool(config)
+    connected = configured and connection_enabled(config)
     snapshot = mpv_properties(["playlist", "playlist-pos", "pause", "idle-active",
                                "time-pos", "duration", "volume"])
     state = sync_queue_from_mpv(config, snapshot.get("playlist") if snapshot else None, snapshot is not None)
     queue = state.get("queue", []) if isinstance(state, dict) else []
     if snapshot is None:
         track = queue[0] if queue else None
-        result = {"configured": configured, "playing": False, "paused": False,
+        result = {"configured": configured, "connected": connected, "playing": False, "paused": False,
                   "track": public_item(track),
                   "position": 0, "duration": (track.get("duration", 0) if track else 0),
                   "volume": max(0, min(130, safe_float(state.get("volume"), 100))),
@@ -1636,6 +1674,7 @@ def status(config: dict[str, Any] | None = None, force_timeline: bool = False) -
         paused = bool(snapshot.get("pause"))
         result = {
             "configured": configured,
+            "connected": connected,
             "playing": not paused and not bool(snapshot.get("idle-active")),
             "paused": paused,
             "track": public_item(track),
@@ -1647,7 +1686,8 @@ def status(config: dict[str, Any] | None = None, force_timeline: bool = False) -
             "queueLength": len(queue),
             "queueIndex": index,
         }
-    update_timeline(config, result, force_timeline)
+    if connected:
+        update_timeline(config, result, force_timeline)
     return result
 
 
@@ -1747,7 +1787,7 @@ def control_running(config: dict[str, Any], action: str, value: float | None = N
 
 
 def configure(args: argparse.Namespace) -> None:
-    previous = load_config(False)
+    previous = load_config(False, include_disabled=True)
     server = normalize_server_url(args.server or input(
         f"Plex server URL [{previous.get('server', 'http://localhost:32400')}]: ").strip()
         or previous.get("server", "http://localhost:32400"))
@@ -1760,9 +1800,14 @@ def configure(args: argparse.Namespace) -> None:
 
 
 def connection_health() -> dict[str, Any]:
-    config = load_config(False)
+    config = load_config(False, include_disabled=True)
     if not config:
-        return {"ok": False, "code": "unconfigured", "message": "Connect your Plex account to start listening."}
+        return {"ok": False, "configured": False, "connected": False, "code": "unconfigured",
+                "message": "Connect your Plex account to start listening."}
+    if not connection_enabled(config):
+        return {"ok": False, "configured": True, "connected": False, "code": "disconnected",
+                "message": "The Plex connection is turned off.", "server": config.get("server", ""),
+                "library": config.get("sectionTitle", "Music")}
     try:
         available = sections(config)
         if not available:
@@ -1770,7 +1815,8 @@ def connection_health() -> dict[str, Any]:
         selected = str(config.get("section", ""))
         if selected and not any(row["key"] == selected for row in available):
             return {"ok": False, "code": "library-missing", "message": "The selected music library no longer exists."}
-        return {"ok": True, "code": "connected", "message": f"Connected to {config.get('sectionTitle', 'Plex music')}",
+        return {"ok": True, "configured": True, "connected": True, "code": "connected",
+                "message": f"Connected to {config.get('sectionTitle', 'Plex music')}",
                 "server": config.get("server", ""), "library": config.get("sectionTitle", "Music")}
     except PlayerError as error:
         server = str(config.get("server", ""))
@@ -1781,7 +1827,7 @@ def connection_health() -> dict[str, Any]:
 
 
 def doctor() -> dict[str, Any]:
-    config = load_config(False)
+    config = load_config(False, include_disabled=True)
     health = connection_health()
     mpris_paths = (pathlib.Path("/etc/mpv/scripts/mpris.so"), pathlib.Path("/usr/lib/mpv-mpris/mpris.so"))
     mpris = next((str(path) for path in mpris_paths if path.is_file()), "")
@@ -1804,6 +1850,7 @@ def doctor() -> dict[str, Any]:
     return {
         "ok": bool(health.get("ok")) and bool(shutil_which("mpv")),
         "configured": bool(config),
+        "connected": bool(config) and connection_enabled(config),
         "connection": health,
         "configFile": str(CONFIG_FILE),
         "configPrivate": config_private,
@@ -1844,7 +1891,7 @@ def demo_items(kind: str = "album") -> list[dict[str, Any]]:
 def demo_dispatch(args: argparse.Namespace) -> Any:
     if args.command in ("status", "control", "play", "play-collection"):
         tracks = demo_items("track")
-        return {"configured": True, "playing": True, "paused": False, "track": tracks[1], "position": 72,
+        return {"configured": True, "connected": True, "playing": True, "paused": False, "track": tracks[1], "position": 72,
                 "duration": tracks[1]["duration"], "volume": 84, "shuffle": True, "repeat": "all",
                 "queueLength": len(tracks), "queueIndex": 1, "demo": True}
     if args.command == "queue":
@@ -1865,6 +1912,8 @@ def demo_dispatch(args: argparse.Namespace) -> Any:
         return {"removed": 0, "bytes": 0, "demo": True}
     if args.command in ("logout", "shutdown"):
         return {"connected": False, "stopped": True, "demo": True}
+    if args.command == "connection":
+        return {"configured": True, "connected": args.state == "on", "stopped": args.state == "off", "demo": True}
     if args.command == "art":
         return {"thumb": "", "demo": True}
     if args.command == "queue-action":
@@ -1882,6 +1931,8 @@ def parser() -> argparse.ArgumentParser:
     login_parser.add_argument("--no-browser", action="store_true")
     commands.add_parser("logout", help="remove the stored Plex account token")
     commands.add_parser("shutdown", help="stop playback and terminate the Tunarchy mpv process")
+    connection_parser = commands.add_parser("connection", help="enable or disable Plex without removing credentials")
+    connection_parser.add_argument("state", choices=("on", "off"))
     setup = commands.add_parser("configure", help="store Plex connection details")
     setup.add_argument("--server")
     setup.add_argument("--section")
@@ -1949,6 +2000,8 @@ def main() -> int:
             result = status()
         elif args.command == "shutdown":
             result = shutdown_player()
+        elif args.command == "connection":
+            result = set_connection(args.state == "on")
         elif args.command == "recent":
             config = load_config()
             result = cached_items(config, f"recent-{args.limit}", lambda: recent(config, args.limit))

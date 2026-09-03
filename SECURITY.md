@@ -34,6 +34,12 @@ Manual token entry uses a non-echoing prompt; tokens are intentionally rejected
 as command-line arguments because process listings and shell history are not
 private credential stores.
 
+The in-panel Plex power switch intentionally preserves the server URL, token,
+client identifier, and selected library in the same private configuration file.
+While switched off, Tunarchy stops playback and timeline reporting and does not
+make Plex API, health, artwork, or library requests. Use `tunarchy logout` when
+the stored credentials should be removed instead of temporarily disabled.
+
 As with every Omarchy shell plugin, the QML and helper execute unsandboxed as
 the logged-in user. Review updates before accepting them.
 

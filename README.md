@@ -9,6 +9,7 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 ## Features
 
 - Plex browser sign-in — no token copying required
+- One-click Plex on/off switch that keeps the saved account for instant reconnects
 - Home, artists, albums, playlists, history, favorites, queue, and search
 - Artist → album → track and playlist → track navigation
 - Album/playlist play and shuffle actions
@@ -107,6 +108,9 @@ ${XDG_CONFIG_HOME:-~/.config}/tunarchy/config.json
   Select **System** to control Omarchy's current audio output (the default), or
   **Plex** to change only Tunarchy's local mpv player volume. Press Escape to
   return to the player.
+- Use the power button in the header to disconnect from Plex without deleting
+  the saved server or token. Switching it back on restores the saved connection;
+  health checks continue retrying automatically if the server is temporarily offline.
 - Hardware media keys work through MPRIS while mpv is running.
 
 The CLI is also useful for troubleshooting:
@@ -116,6 +120,8 @@ PLAYER="$HOME/.config/omarchy/plugins/io.github.flathack.tunarchy/bin/tunarchy"
 "$PLAYER" doctor
 "$PLAYER" status
 "$PLAYER" health
+"$PLAYER" connection off
+"$PLAYER" connection on
 "$PLAYER" library artists --limit 5
 "$PLAYER" queue
 ```

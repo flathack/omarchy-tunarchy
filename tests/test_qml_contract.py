@@ -150,9 +150,22 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("message.length > 400", QML)
 
     def test_active_artwork_uses_async_frontend_pipeline(self):
-        self.assertIn("if (parsed.track) requestArtwork(parsed.track.artSource)", QML)
-        self.assertIn("activeTrack ? artworkThumb(activeTrack)", QML)
+        self.assertIn("if (parsed.track && (parsed.connected !== false || demoMode)) requestArtwork(parsed.track.artSource)", QML)
+        self.assertIn("plexConnected && activeTrack ? artworkThumb(activeTrack)", QML)
         self.assertIn("source: root.activeThumb", QML)
+
+    def test_connection_toggle_preserves_setup_and_gates_plex_ui(self):
+        self.assertIn("readonly property bool plexConnected", QML)
+        self.assertIn("function setConnection(enabled)", QML)
+        self.assertIn('command(["connection", enabled ? "on" : "off"])', QML)
+        self.assertIn("id: connectionButton", QML)
+        self.assertIn('tooltipText: root.plexConnected ? "Disconnect from Plex" : "Connect to Plex"', QML)
+        self.assertIn("enabled: !connectionProc.running", QML)
+        self.assertIn("visible: !root.helpVisible && root.plexConnected", QML)
+        self.assertIn('root.health.code === "disconnected"', QML)
+        for process in ("dataProc", "artProc", "actionProc", "queueEditProc", "healthProc", "statusProc"):
+            self.assertIn(f"if ({process}.running) {process}.running = false", QML)
+        self.assertIn("if (root.disconnecting) return", QML)
 
     def test_complete_keyboard_navigation_contract(self):
         self.assertGreaterEqual(QML.count("focusable: true"), 15)
@@ -172,7 +185,7 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('width: root.helpVisible ? Style.space(64) : Style.space(46)', QML)
         self.assertNotIn('iconText: "?"', QML)
         self.assertIn('sequence: "F1"', QML)
-        self.assertIn('text: root.helpVisible ? "Tunarchy"', QML)
+        self.assertIn('text: root.helpVisible || !root.plexConnected ? "Tunarchy"', QML)
         self.assertIn('text: root.helpVisible ? "Help · Keyboard map and player settings"', QML)
         self.assertNotIn("↑↓ Select  ·  Enter Play", QML)
 
