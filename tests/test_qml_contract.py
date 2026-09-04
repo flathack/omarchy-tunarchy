@@ -1,10 +1,28 @@
 import pathlib
+import re
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 QML = (ROOT / "Panel.qml").read_text(encoding="utf-8")
 MODEL = (ROOT / "Model.js").read_text(encoding="utf-8")
+
+
+def text_blocks(source):
+    blocks = []
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
+        if not re.match(r"^\s*Text \{", line):
+            continue
+        block = [line]
+        depth = line.count("{") - line.count("}")
+        for following in lines[index + 1:]:
+            if depth <= 0:
+                break
+            block.append(following)
+            depth += following.count("{") - following.count("}")
+        blocks.append("\n".join(block))
+    return blocks
 
 
 class QmlContractTests(unittest.TestCase):
@@ -153,6 +171,12 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("if (parsed.track && (parsed.connected !== false || demoMode)) requestArtwork(parsed.track.artSource)", QML)
         self.assertIn("plexConnected && activeTrack ? artworkThumb(activeTrack)", QML)
         self.assertIn("source: root.activeThumb", QML)
+
+    def test_panel_text_items_are_explicitly_plain_text(self):
+        blocks = text_blocks(QML)
+        self.assertGreaterEqual(len(blocks), 20)
+        for block in blocks:
+            self.assertIn("textFormat: Text.PlainText", block)
 
     def test_connection_toggle_preserves_setup_and_gates_plex_ui(self):
         self.assertIn("readonly property bool plexConnected", QML)

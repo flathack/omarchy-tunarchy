@@ -852,6 +852,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: root.plexConnected && root.activeTrack !== null && !button.vertical
         width: Math.max(0, parent.width - coverFrame.width - parent.spacing)
         anchors.verticalCenter: parent.verticalCenter
@@ -904,6 +905,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             visible: !root.helpVisible && headerCover.status !== Image.Ready
             text: ""
@@ -928,6 +930,7 @@ Panel {
           spacing: Style.space(3)
 
           Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: root.helpVisible || !root.plexConnected ? "Tunarchy" : (root.activeTrack ? root.activeTrack.title : "Tunarchy")
             color: root.foreground
@@ -938,6 +941,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: root.helpVisible ? "Help · Keyboard map and player settings"
               : (!root.plexConnected && root.configured ? "Plex connection is off"
@@ -954,6 +958,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               text: Model.formatTime(root.player.position)
               color: root.dim
               font.family: root.fontFamily
@@ -993,6 +998,7 @@ Panel {
               }
             }
             Text {
+              textFormat: Text.PlainText
               text: Model.formatTime(root.player.duration)
               color: root.dim
               font.family: root.fontFamily
@@ -1006,6 +1012,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               text: "\uf028"
               color: root.dim
               font.family: root.fontFamily
@@ -1048,6 +1055,7 @@ Panel {
               }
             }
             Text {
+              textFormat: Text.PlainText
               text: root.volumeAvailable
                 ? Math.round(volumeSlider.dragging ? volumeSlider.liveValue : root.displayedVolume) + "%" : "N/A"
               color: root.dim
@@ -1126,6 +1134,7 @@ Panel {
           spacing: Style.space(4)
 
           Text {
+            textFormat: Text.PlainText
             width: helpColumn.width
             text: "Volume control"
             color: root.foreground
@@ -1166,6 +1175,7 @@ Panel {
                 Keys.onSpacePressed: root.selectVolumeMode(modelData.value)
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   text: parent.modelData.icon + "  " + parent.modelData.label
                   color: root.foreground
@@ -1188,6 +1198,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: helpColumn.width
             text: root.volumeMode === "system"
               ? "The slider changes Omarchy's current audio output."
@@ -1215,6 +1226,7 @@ Panel {
                 borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   text: modelData.keys
                   color: root.foreground
@@ -1225,6 +1237,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: modelData.action
                 color: root.foreground
@@ -1311,8 +1324,9 @@ Panel {
           anchors.leftMargin: Style.space(8)
           anchors.rightMargin: Style.space(8)
           spacing: Style.space(8)
-          Text { text: "\uf071"; color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.icon }
+          Text { textFormat: Text.PlainText; text: "\uf071"; color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.icon }
           Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: root.health.message || "Plex is not reachable."
             color: root.foreground
@@ -1367,6 +1381,7 @@ Panel {
               Keys.onSpacePressed: root.loadView(modelData.id)
 
               Text {
+                textFormat: Text.PlainText
                 id: navLabel
                 anchors.centerIn: parent
                 text: navItem.modelData.icon + " " + navItem.modelData.label
@@ -1422,6 +1437,7 @@ Panel {
           onClicked: root.goBack()
         }
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: root.view === "children" ? root.currentParentTitle
             : (root.view === "search" ? "Search results"
@@ -1452,6 +1468,7 @@ Panel {
           onClicked: root.runQueueAction("clear-upcoming")
         }
         Text {
+          textFormat: Text.PlainText
           text: root.loading ? "Loading…" : root.items.length + (root.items.length === 1 ? " item" : " items")
           color: root.dim
           font.family: root.fontFamily
@@ -1460,6 +1477,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: !root.helpVisible && root.errorText !== ""
         width: parent.width
         text: root.errorText
@@ -1470,6 +1488,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: !root.helpVisible && root.plexConnected && !root.loading && root.errorText === "" && root.items.length === 0
         width: parent.width
         text: root.view === "search" ? "No matches." : "Nothing here yet."
@@ -1544,6 +1563,7 @@ Panel {
               Layout.fillWidth: true
               spacing: 1
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: mediaRow.modelData.title || "Untitled"
                 color: root.foreground
@@ -1553,6 +1573,7 @@ Panel {
                 elide: Text.ElideRight
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: Model.subtitle(mediaRow.modelData)
                 color: root.dim
@@ -1562,6 +1583,7 @@ Panel {
               }
             }
             Text {
+              textFormat: Text.PlainText
               visible: root.view !== "queue" && mediaRow.modelData.type !== "album" && mediaRow.modelData.type !== "playlist"
               text: mediaRow.modelData.type === "artist" ? mediaRow.modelData.leafCount + " albums" : Model.formatTime(mediaRow.modelData.duration)
               color: root.dim
@@ -1587,12 +1609,13 @@ Panel {
                 focusable: true; Accessible.name: tooltipText + ": " + (mediaRow.modelData.title || "collection")
                 onClicked: root.playItemCollection(mediaRow.modelData, true)
               }
-              Text { text: "\uf054"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+              Text { textFormat: Text.PlainText; text: "\uf054"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
             }
             Row {
               visible: root.view === "queue"
               spacing: Style.space(2)
               Text {
+                textFormat: Text.PlainText
                 visible: mediaRow.modelData.current === true
                 text: root.player && root.player.playing ? "\uf04c" : "\uf04b"
                 color: Color.urgent
