@@ -6,6 +6,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 QML = (ROOT / "Panel.qml").read_text(encoding="utf-8")
 MODEL = (ROOT / "Model.js").read_text(encoding="utf-8")
+PLACEHOLDER = (ROOT / "CoverPlaceholder.qml").read_text(encoding="utf-8")
 
 
 def text_blocks(source):
@@ -44,12 +45,17 @@ class QmlContractTests(unittest.TestCase):
                        'control("volume"', 'control("shuffle")', 'control("repeat")'):
             self.assertIn(action, QML)
 
-    def test_bar_shows_active_album_cover_with_logo_fallback(self):
+    def test_missing_covers_use_theme_aware_placeholder(self):
         self.assertIn("readonly property string activeThumb", QML)
         self.assertIn("id: barCover", QML)
         self.assertIn("source: root.activeThumb", QML)
         self.assertIn("source: root.tuna24Url", QML)
-        self.assertIn("visible: !barCover.visible", QML)
+        self.assertEqual(QML.count("CoverPlaceholder {"), 3)
+        self.assertIn("visible: !!root.activeTrack && !barCover.visible", QML)
+        self.assertIn("visible: !root.activeTrack && !barCover.visible", QML)
+        self.assertIn("visible: !root.helpVisible && !!root.activeTrack && !headerCover.visible", QML)
+        self.assertIn("visible: rowCover.status !== Image.Ready", QML)
+        self.assertIn("property color foreground: Color.accent", PLACEHOLDER)
         self.assertIn("fixedHeight: vertical ? Style.bar.iconSlot", QML)
 
     def test_tuna_assets_scale_across_player_ui(self):
@@ -126,7 +132,9 @@ class QmlContractTests(unittest.TestCase):
     def test_volume_defaults_to_system_output_with_player_option(self):
         self.assertIn("import Quickshell.Services.Pipewire", QML)
         self.assertIn('setting("volumeMode", "System")', QML)
-        self.assertIn('volumeSink.audio.volume = next / 100', QML)
+        self.assertIn('Quickshell.execDetached(["pactl", "set-sink-volume",', QML)
+        self.assertIn('String(volumeSink.name), String(Math.round(next)) + "%"', QML)
+        self.assertNotIn('volumeSink.audio.volume = next / 100', QML)
         self.assertIn('control("volume", next)', QML)
         self.assertIn('["omarchy", "bar", "set", moduleName, "volumeMode"', QML)
         self.assertIn('command: ["omarchy-audio-output-sink"]', QML)
@@ -149,6 +157,9 @@ class QmlContractTests(unittest.TestCase):
     def test_artwork_is_lazy_bounded_and_decode_limited(self):
         self.assertIn('command(["art", activeArtwork])', QML)
         self.assertIn("pendingArtwork.length >= 32", QML)
+        self.assertIn("function requestVisibleArtwork()", QML)
+        self.assertIn("root.requestVisibleArtwork()", QML)
+        self.assertIn("itemList.indexAt(1, y)", QML)
         self.assertIn("property int artworkGeneration: 0", QML)
         self.assertIn("requestedArtwork[value]", QML)
         self.assertIn("if (artProc.running) artProc.running = false", QML)
@@ -177,6 +188,13 @@ class QmlContractTests(unittest.TestCase):
         self.assertGreaterEqual(len(blocks), 20)
         for block in blocks:
             self.assertIn("textFormat: Text.PlainText", block)
+
+    def test_omarchy_theme_roles_update_the_popup(self):
+        self.assertIn("readonly property color foreground: Color.popups.text", QML)
+        self.assertIn("readonly property string fontFamily: Style.font.family", QML)
+        self.assertIn("color: button.foreground", QML)
+        self.assertIn("foreground: root.player && root.player.shuffle ? Color.accent : root.foreground", QML)
+        self.assertIn('foreground: root.player && root.player.repeat !== "off" ? Color.accent : root.foreground', QML)
 
     def test_connection_toggle_preserves_setup_and_gates_plex_ui(self):
         self.assertIn("readonly property bool plexConnected", QML)

@@ -38,7 +38,7 @@ SOCKET_FILE = CACHE_DIR / "mpv.sock"
 DATA_CACHE_DIR = CACHE_DIR / "data"
 ART_CACHE_DIR = CACHE_DIR / "art"
 APP_NAME = "Tunarchy"
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.10.0"
 PLEX_AUTH_URL = "https://plex.tv/api/v2"
 TIMELINE_INTERVAL_SECONDS = 10
 CONFIG_MAX_BYTES = 64 * 1024
@@ -699,48 +699,42 @@ def image_dimensions(data: bytes) -> tuple[int, int] | None:
     return None
 
 
-def valid_image_payload(data: bytes) -> bool:
-    dimensions = image_dimensions(data[:256 * 1024])
+def valid_image_parts(head: bytes, tail: bytes, size: int) -> bool:
+    dimensions = image_dimensions(head)
     if not dimensions:
         return False
     width, height = dimensions
     structurally_complete = (
-        (data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"))
-        or (data.startswith(b"\x89PNG\r\n\x1a\n") and data.endswith(b"IEND\xaeB\x60\x82"))
-        or (data[:6] in (b"GIF87a", b"GIF89a") and data.endswith(b";"))
-        or (data.startswith(b"RIFF") and data[8:12] == b"WEBP"
-            and len(data) >= 12 and int.from_bytes(data[4:8], "little") + 8 == len(data))
+        (head.startswith(b"\xff\xd8") and tail.endswith(b"\xff\xd9"))
+        or (head.startswith(b"\x89PNG\r\n\x1a\n") and tail.endswith(b"IEND\xaeB\x60\x82"))
+        or (head[:6] in (b"GIF87a", b"GIF89a") and tail.endswith(b";"))
+        or (head.startswith(b"RIFF") and head[8:12] == b"WEBP"
+            and size >= 12 and int.from_bytes(head[4:8], "little") + 8 == size)
     )
     return structurally_complete and 0 < width <= ART_MAX_DIMENSION and 0 < height <= ART_MAX_DIMENSION \
         and width * height <= ART_MAX_PIXELS
 
 
-def cached_art_payload(target: pathlib.Path) -> bytes:
-    with secure_parent_directory(target) as (parent, filename):
-        descriptor = os.open(filename, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
-        try:
-            details = os.fstat(descriptor)
-            if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid() \
-                    or stat.S_IMODE(details.st_mode) != 0o600 or not 0 < details.st_size <= ART_MAX_BYTES:
-                return b""
-            payload = bytearray()
-            while len(payload) < details.st_size:
-                chunk = os.read(descriptor, min(65536, details.st_size - len(payload)))
-                if not chunk:
-                    break
-                payload.extend(chunk)
-            return bytes(payload)
-        finally:
-            os.close(descriptor)
+def valid_image_payload(data: bytes) -> bool:
+    return valid_image_parts(data[:256 * 1024], data[-32:], len(data))
 
 
 def valid_cached_art(target: pathlib.Path) -> bool:
-    target_info = secure_stat(target)
-    if not (target_info and stat.S_ISREG(target_info.st_mode) and target_info.st_uid == os.geteuid()
-            and stat.S_IMODE(target_info.st_mode) == 0o600 and 0 < target_info.st_size <= ART_MAX_BYTES):
-        return False
+    """Validate private cache metadata and image markers with bounded reads."""
     try:
-        return valid_image_payload(cached_art_payload(target))
+        with secure_parent_directory(target) as (parent, filename):
+            descriptor = os.open(filename, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid() \
+                        or stat.S_IMODE(details.st_mode) != 0o600 or not 0 < details.st_size <= ART_MAX_BYTES:
+                    return False
+                head = os.read(descriptor, min(details.st_size, 256 * 1024))
+                os.lseek(descriptor, max(0, details.st_size - 32), os.SEEK_SET)
+                tail = os.read(descriptor, 32)
+                return valid_image_parts(head, tail, details.st_size)
+            finally:
+                os.close(descriptor)
     except (OSError, PlayerError):
         return False
 
@@ -783,11 +777,20 @@ def art_path(config: dict[str, Any], source: str | None) -> str:
     try:
         with safe_urlopen(request, timeout=8) as response:
             data = response.read(ART_MAX_BYTES + 1)
-        if data and len(data) <= ART_MAX_BYTES and valid_image_payload(data):
+        if data and len(data) <= min(ART_MAX_BYTES, CACHE_MAX_BYTES) and valid_image_payload(data):
             with art_cache_lock():
                 if not valid_cached_art(target):
+                    # Reserve space before writing. The private counter is updated
+                    # first, so an interrupted write only overestimates usage.
+                    marker = CACHE_DIR / ".art-cleanup-budget"
+                    budget = max(1, min(16 * 1024 * 1024, CACHE_MAX_BYTES // 4))
+                    recorded = load_json(marker, None, maximum=128)
+                    used = safe_int(recorded.get("bytes"), -1) if isinstance(recorded, dict) else -1
+                    if used < 0 or used + len(data) > budget:
+                        cleanup_cache(max_bytes=max(0, CACHE_MAX_BYTES - max(budget, len(data))))
+                        used = 0
+                    atomic_json(marker, {"bytes": used + len(data)}, maximum=128)
                     atomic_bytes(target, data, maximum=ART_MAX_BYTES)
-                cleanup_cache(max_bytes=CACHE_MAX_BYTES)
             return target.as_uri() if valid_cached_art(target) else ""
     except (OSError, PlayerError, urllib.error.URLError, TimeoutError):
         pass
@@ -841,7 +844,7 @@ def cached_items(config: dict[str, Any], name: str, loader: Any) -> dict[str, An
         items = loader()
         payload = {"items": items, "stale": False, "cachedAt": int(time.time())}
         atomic_json(target, payload, maximum=DATA_MAX_BYTES)
-        cleanup_cache(max_bytes=CACHE_MAX_BYTES)
+        cleanup_cache(max_bytes=max(0, CACHE_MAX_BYTES - min(16 * 1024 * 1024, CACHE_MAX_BYTES // 4)))
         return payload
     except PlayerError as error:
         cached = load_json(target, {}, DATA_MAX_BYTES)

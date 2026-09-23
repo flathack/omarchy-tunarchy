@@ -77,9 +77,12 @@ Panel {
   readonly property url tuna24Url: Qt.resolvedUrl("assets/tuna-ui-24.png")
   readonly property url tuna64Url: Qt.resolvedUrl("assets/tuna-ui-64.png")
   readonly property string helperPath: decodeURIComponent(String(helperUrl).replace(/^file:\/\//, ""))
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  // The bar and its popup can use different text colors in shell.toml.
+  // Color and Style are live Omarchy singletons, so theme and font changes
+  // update the open panel without a plugin restart.
+  readonly property color foreground: Color.popups.text
   readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property string fontFamily: Style.font.family
   readonly property var activeTrack: player && player.track ? player.track : null
   readonly property string activeThumb: plexConnected && activeTrack ? artworkThumb(activeTrack) : ""
   readonly property bool configured: player && player.configured === true
@@ -396,7 +399,10 @@ Panel {
         errorText = "The system audio output is not available."
         return
       }
-      volumeSink.audio.volume = next / 100
+      // Match the working Omarchy audio panel: direct PwNodeAudio writes do
+      // not reliably change the Bluetooth hearing-aid output volume.
+      Quickshell.execDetached(["pactl", "set-sink-volume",
+        String(volumeSink.name), String(Math.round(next)) + "%"])
       if (bar && bar.shell) bar.shell.summon("omarchy.osd", JSON.stringify({ icon: "\uf028", value: Math.round(next) }))
       return
     }
@@ -494,6 +500,19 @@ Panel {
     activeArtworkGeneration = Number(job.generation)
     artProc.command = command(["art", activeArtwork])
     artProc.running = true
+  }
+
+  function requestVisibleArtwork() {
+    if (!opened || !plexConnected) return
+    if (activeTrack) requestArtwork(activeTrack.artSource)
+    // Revisit visible rows after a full queue drains. Delegates that stayed
+    // on screen do not run Component.onCompleted again.
+    var top = itemList.contentY
+    var bottom = top + itemList.height
+    for (var y = top + 1; y < bottom; y += Style.space(54)) {
+      var index = itemList.indexAt(1, y)
+      if (index >= 0 && index < items.length) requestArtwork(items[index].artSource)
+    }
   }
 
   function applyArtwork(source, raw) {
@@ -688,6 +707,7 @@ Panel {
       if (exitCode === 0 && generation === root.artworkGeneration) root.applyArtwork(source, artOutput.text)
       root.activeArtwork = ""
       root.activeArtworkGeneration = 0
+      root.requestVisibleArtwork()
       Qt.callLater(root.startNextArtwork)
     }
   }
@@ -840,6 +860,12 @@ Panel {
           visible: root.activeThumb !== "" && status === Image.Ready
         }
 
+        CoverPlaceholder {
+          anchors.fill: parent
+          foreground: button.foreground
+          visible: !!root.activeTrack && !barCover.visible
+        }
+
         Image {
           anchors.fill: parent
           anchors.margins: Style.space(2)
@@ -847,7 +873,7 @@ Panel {
           fillMode: Image.PreserveAspectFit
           smooth: false
           mipmap: false
-          visible: !barCover.visible
+          visible: !root.activeTrack && !barCover.visible
         }
       }
 
@@ -904,11 +930,10 @@ Panel {
             visible: !root.helpVisible && status === Image.Ready
           }
 
-          Text {
-            textFormat: Text.PlainText
-            anchors.centerIn: parent
-            visible: !root.helpVisible && headerCover.status !== Image.Ready
-            text: ""
+          CoverPlaceholder {
+            anchors.fill: parent
+            foreground: Color.accent
+            visible: !root.helpVisible && !!root.activeTrack && !headerCover.visible
           }
 
           Image {
@@ -916,7 +941,7 @@ Panel {
             anchors.centerIn: parent
             width: root.helpVisible ? Style.space(64) : Style.space(46)
             height: width
-            visible: root.helpVisible || headerCover.status !== Image.Ready
+            visible: root.helpVisible || (!root.activeTrack && !headerCover.visible)
             source: root.helpVisible ? root.tuna64Url : root.tuna24Url
             fillMode: Image.PreserveAspectFit
             smooth: false
@@ -1261,7 +1286,7 @@ Panel {
           spacing: Style.space(10)
           PanelActionButton {
             iconText: "\uf074"; tooltipText: root.player && root.player.shuffle ? "Shuffle on" : "Shuffle off"
-            foreground: root.player && root.player.shuffle ? Color.urgent : root.foreground
+            foreground: root.player && root.player.shuffle ? Color.accent : root.foreground
             fontFamily: root.fontFamily; bordered: root.player && root.player.shuffle === true; focusable: true
             Accessible.name: tooltipText
             onClicked: root.control("shuffle")
@@ -1288,7 +1313,7 @@ Panel {
           PanelActionButton {
             iconText: root.player && root.player.repeat === "one" ? "\uf366" : "\uf363"
             tooltipText: root.player && root.player.repeat === "one" ? "Repeat one" : (root.player && root.player.repeat === "all" ? "Repeat all" : "Repeat off")
-            foreground: root.player && root.player.repeat !== "off" ? Color.urgent : root.foreground
+            foreground: root.player && root.player.repeat !== "off" ? Color.accent : root.foreground
             fontFamily: root.fontFamily; bordered: root.player && root.player.repeat !== "off"; focusable: true
             Accessible.name: tooltipText
             onClicked: root.control("repeat")
@@ -1551,12 +1576,18 @@ Panel {
               color: Style.selectedFillFor(root.foreground, Color.accent)
               clip: true
               Image {
+                id: rowCover
                 anchors.fill: parent
                 source: root.artworkThumb(mediaRow.modelData)
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 sourceSize.width: Math.max(1, Math.round(width * 2))
                 sourceSize.height: Math.max(1, Math.round(height * 2))
+              }
+              CoverPlaceholder {
+                anchors.fill: parent
+                foreground: Color.accent
+                visible: rowCover.status !== Image.Ready
               }
             }
             ColumnLayout {

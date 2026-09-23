@@ -224,6 +224,36 @@ class StorageTests(unittest.TestCase):
             total = sum(path.stat().st_size for path in player.ART_CACHE_DIR.iterdir())
         self.assertLessEqual(total, len(FAKE_PNG) + 1)
 
+    def test_art_cleanup_is_amortized_across_downloads(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = FAKE_PNG
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(player, "CACHE_DIR", pathlib.Path(folder)), \
+             mock.patch.object(player, "ART_CACHE_DIR", pathlib.Path(folder) / "art"), \
+             mock.patch.object(player, "DATA_CACHE_DIR", pathlib.Path(folder) / "data"), \
+             mock.patch.object(player, "safe_urlopen", return_value=response), \
+             mock.patch.object(player, "cleanup_cache", wraps=player.cleanup_cache) as cleanup:
+            config = {"server": "http://plex", "token": "tok"}
+            self.assertTrue(player.art_path(config, "/thumb/1"))
+            self.assertTrue(player.art_path(config, "/thumb/2"))
+            self.assertEqual(cleanup.call_count, 1)
+
+    def test_cached_art_validation_reads_only_image_edges(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = pathlib.Path(folder) / "cover.jpg"
+            player.atomic_bytes(target, FAKE_PNG[:-8] + b"x" * (1024 * 1024) + FAKE_PNG[-8:])
+            real_read = os.read
+            sizes = []
+
+            def counted_read(descriptor, size):
+                sizes.append(size)
+                return real_read(descriptor, size)
+
+            with mock.patch.object(player.os, "read", side_effect=counted_read):
+                self.assertTrue(player.valid_cached_art(target))
+            self.assertLessEqual(sum(sizes), 256 * 1024 + 32)
+
     def test_library_artwork_is_loaded_lazily(self):
         config = {"server": "http://plex", "token": "tok"}
         with mock.patch.object(player, "art_path") as art:
@@ -1295,7 +1325,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(manifest["schemaVersion"], 1)
         self.assertIn("bar-widget", manifest["kinds"])
         self.assertTrue((ROOT / manifest["entryPoints"]["barWidget"]).is_file())
-        self.assertEqual(manifest["version"], "0.9.0")
+        self.assertEqual(manifest["version"], "0.10.0")
         self.assertIn(f'APP_VERSION = "{manifest["version"]}"', HELPER.read_text(encoding="utf-8"))
         for asset in ("tuna-brand.png", "tuna-ui-18.png", "tuna-ui-24.png", "tuna-ui-64.png"):
             self.assertTrue((ROOT / "assets" / asset).is_file())

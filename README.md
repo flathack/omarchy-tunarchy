@@ -15,6 +15,7 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 - Album/playlist play and shuffle actions
 - Manageable queue with play, reorder, remove, and clear-upcoming actions
 - Album cover in the bar and player, progress, seek, play/pause, previous, and next
+- Theme-colored record placeholder when Plex has no usable cover art
 - System output volume by default, with optional 0–130% local player volume
 - Shuffle, repeat-all, and repeat-one
 - MPRIS integration for hardware media keys and desktop media controls
@@ -22,6 +23,8 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 - Actionable offline, authentication, DNS, library, and server error states
 - Lazy on-demand artwork loading, bounded private cache, and offline last-good data
 - Native Omarchy/Quickshell styling with top, bottom, and vertical bar support
+- Live Omarchy theme and font matching: the bar label uses bar colors, while
+  the player panel uses popup text, accent, and error colors from the active theme
 - Keyboard and mouse navigation
 - Credential-free demo mode with fictional music
 - No Python packages: the helper uses only Python's standard library
@@ -82,6 +85,11 @@ ${XDG_CONFIG_HOME:-~/.config}/tunarchy/config.json
 ```
 
 ## Usage
+
+Tunarchy follows Omarchy theme and font changes automatically, including while
+the player panel is open. Use `omarchy theme set <name>` or `omarchy font set
+<name>` as usual; no separate Tunarchy theme or restart is needed. Themes may
+customize popup text through `popups.text` in Omarchy's `shell.toml`.
 
 - Left-click the bar item to open the player.
 - Right-click it to reconfigure the Plex connection.
