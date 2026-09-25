@@ -32,6 +32,7 @@ Panel {
   property string queuedDataMode: ""
   property var queuedDataCommand: []
   property bool suppressSearch: false
+  property bool miniSearchPending: false
   property int pendingSelectedIndex: -1
   property bool helpVisible: false
   property var pendingActions: []
@@ -45,6 +46,9 @@ Panel {
   property int activeArtworkGeneration: 0
   property string volumeSinkName: ""
   property string volumeModeOverride: ""
+  property var miniModeOverride: null
+  property bool fullViewTemporary: false
+  property bool pendingOpenView: false
   property bool disconnecting: false
 
   readonly property var navigation: [
@@ -109,6 +113,8 @@ Panel {
   }
   readonly property string configuredVolumeMode: normalizeVolumeMode(setting("volumeMode", "System"))
   readonly property string volumeMode: volumeModeOverride || configuredVolumeMode
+  readonly property bool miniMode: miniModeOverride === null ? setting("miniMode", false) === true : miniModeOverride
+  readonly property bool miniActive: miniMode && !fullViewTemporary && !helpVisible
   readonly property real systemVolume: volumeSink && volumeSink.audio
     ? Math.max(0, Math.min(100, Number(volumeSink.audio.volume) * 100)) : 0
   readonly property real displayedVolume: volumeMode === "system"
@@ -116,7 +122,7 @@ Panel {
   readonly property real volumeMaximum: volumeMode === "system" ? 100 : 130
   readonly property bool volumeAvailable: volumeMode !== "system" || !!(volumeSink && volumeSink.audio)
   readonly property bool navigationShortcutsEnabled: opened && plexConnected
-    && !helpVisible && !searchField.activeFocus && !seekFocus.activeFocus && !volumeFocus.activeFocus
+    && !miniActive && !helpVisible && !searchField.activeFocus && !seekFocus.activeFocus && !volumeFocus.activeFocus
 
   onAudioSinkChanged: resolveVolumeSink()
 
@@ -136,6 +142,55 @@ Panel {
     if (next === "system") resolveVolumeSink()
   }
 
+  function selectPlayerView(mini) {
+    miniModeOverride = mini
+    if (!mini) fullViewTemporary = false
+    miniModeProc.command = ["omarchy", "bar", "set", moduleName, "miniMode", mini ? "true" : "false", "--json"]
+    if (!miniModeProc.running) miniModeProc.running = true
+  }
+
+  function showFullView() {
+    fullViewTemporary = true
+    if (plexConnected) {
+      loadView(Model.defaultView(player))
+      pendingOpenView = true
+      refreshStatus()
+    }
+    Qt.callLater(function() {
+      if (root.plexConnected) (root.view === "queue" ? itemList : searchField).forceActiveFocus()
+      else connectButton.forceActiveFocus()
+    })
+  }
+
+  function updateMiniSearch(value) {
+    query = value
+    view = "search"
+    items = []
+    selectedIndex = 0
+    searchDebounce.stop()
+    if (value.trim() !== "") {
+      miniSearchPending = true
+      searchDebounce.restart()
+    } else {
+      miniSearchPending = false
+      nextDataRequestId += 1
+      requestedDataRequestId = nextDataRequestId
+      queuedDataRequestId = 0
+      queuedDataMode = ""
+      queuedDataCommand = []
+      if (dataProc.running) dataProc.running = false
+      loading = false
+      errorText = ""
+    }
+  }
+
+  function playMiniSelection() {
+    if (view !== "search" || selectedIndex < 0 || selectedIndex >= items.length) return
+    var item = items[selectedIndex]
+    if (item.type === "album" || item.type === "playlist") playItemCollection(item, false)
+    else if (item.type === "track") activateItem(item)
+  }
+
   function command(args) {
     var result = [helperPath]
     if (demoMode) result.push("--demo")
@@ -145,18 +200,27 @@ Panel {
 
   function open() {
     helpVisible = false
+    fullViewTemporary = false
     controller.show()
     refreshStatus()
     refreshHealth()
-    if (plexConnected) loadView(Model.defaultView(player))
-    Qt.callLater(searchField.forceActiveFocus)
+    if (plexConnected && !miniMode) {
+      loadView(Model.defaultView(player))
+      pendingOpenView = true
+    }
+    Qt.callLater(function() {
+      if (root.miniActive) (root.plexConnected ? miniSearchField : miniHelpButton).forceActiveFocus()
+      else (root.plexConnected ? (root.view === "queue" ? itemList : searchField) : connectButton).forceActiveFocus()
+    })
   }
 
   function close() {
     controller.hide()
+    pendingOpenView = false
     query = ""
     errorText = ""
     helpVisible = false
+    fullViewTemporary = false
   }
 
   function parseJson(raw, fallback) {
@@ -201,8 +265,13 @@ Panel {
       var wasConnected = plexConnected
       player = parsed
       if (parsed.track && (parsed.connected !== false || demoMode)) requestArtwork(parsed.track.artSource)
+      if (pendingOpenView && opened && !miniActive && plexConnected) {
+        pendingOpenView = false
+        var openingView = Model.defaultView(parsed)
+        if (view !== openingView) loadView(openingView)
+      }
       if (opened && !wasConnected && (parsed.connected !== false || demoMode) && items.length === 0 && !loading)
-        loadView("recent")
+        loadView(Model.defaultView(parsed))
     }
   }
 
@@ -281,6 +350,7 @@ Panel {
   }
 
   function loadView(nextView) {
+    pendingOpenView = false
     suppressSearch = true
     query = ""
     searchDebounce.stop()
@@ -304,6 +374,7 @@ Panel {
   function searchNow() {
     var value = query.trim()
     if (value === "") { loadView("recent"); return }
+    miniSearchPending = false
     view = "search"
     currentParentKey = ""
     currentParentKind = ""
@@ -345,7 +416,10 @@ Panel {
   function handleEscape() {
     if (helpVisible) {
       helpVisible = false
-      Qt.callLater(helpButton.forceActiveFocus)
+      Qt.callLater(function() { (root.miniActive ? miniBrowseButton : helpButton).forceActiveFocus() })
+    } else if (fullViewTemporary) {
+      fullViewTemporary = false
+      Qt.callLater(miniBrowseButton.forceActiveFocus)
     } else if (query.trim() !== "") {
       suppressSearch = true
       query = ""
@@ -635,7 +709,7 @@ Panel {
     enabled: root.opened
     onActivated: {
       root.helpVisible = !root.helpVisible
-      Qt.callLater(helpButton.forceActiveFocus)
+      Qt.callLater(function() { (root.miniActive ? miniBrowseButton : helpButton).forceActiveFocus() })
     }
   }
 
@@ -678,6 +752,17 @@ Panel {
       if (exitCode !== 0) {
         root.volumeModeOverride = ""
         root.errorText = root.errorMessage(volumeModeError.text, "Could not save the volume preference.")
+      }
+    }
+  }
+
+  Process {
+    id: miniModeProc
+    stderr: StdioCollector { id: miniModeError; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.miniModeOverride = null
+        root.errorText = root.errorMessage(miniModeError.text, "Could not save the player view.")
       }
     }
   }
@@ -816,7 +901,7 @@ Panel {
     bar: root.bar
     labelVisible: false
     hasVisualContent: true
-    fixedWidth: vertical ? -1 : (root.plexConnected && root.activeTrack ? Style.space(180) : Style.bar.iconSlot)
+    fixedWidth: vertical ? -1 : (root.miniMode ? Style.bar.iconSlot : (root.plexConnected && root.activeTrack ? Style.space(180) : Style.bar.iconSlot))
     fixedHeight: vertical ? Style.bar.iconSlot : -1
     tooltipText: !root.plexConnected && root.configured ? "Tunarchy · Plex connection off" : root.activeTrack
       ? root.activeTrack.title + (Model.subtitle(root.activeTrack) ? " · " + Model.subtitle(root.activeTrack) : "")
@@ -831,8 +916,20 @@ Panel {
       if (root.activeTrack) root.control(delta > 0 ? "previous" : "next")
     }
 
+    Text {
+      textFormat: Text.PlainText
+      anchors.centerIn: parent
+      visible: root.miniMode
+      text: "\uf001"
+      color: button.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.icon
+      Accessible.name: "Music"
+    }
+
     Row {
       id: barContent
+      visible: !root.miniMode
       anchors.centerIn: parent
       width: button.vertical ? coverFrame.width : parent.width - Style.space(16)
       height: coverFrame.height
@@ -898,13 +995,358 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: true
-    focusTarget: root.helpVisible ? helpButton : root.plexConnected
+    focusTarget: root.miniActive ? (root.plexConnected ? miniSearchField : miniHelpButton) : root.helpVisible ? helpButton : root.plexConnected
       ? (root.view === "queue" ? itemList : searchField) : (root.configured ? connectionButton : connectButton)
-    contentWidth: fittedContentWidth(Style.space(540))
-    contentHeight: fittedContentHeight(contentColumn.implicitHeight, Style.space(790))
+    contentWidth: fittedContentWidth(Style.space(root.miniActive ? 330 : 540))
+    contentHeight: fittedContentHeight(root.miniActive ? miniContent.implicitHeight : contentColumn.implicitHeight,
+      Style.space(root.miniActive ? 550 : 790))
+
+    Column {
+      id: miniContent
+      visible: root.miniActive
+      width: parent.width
+      spacing: Style.space(10)
+
+      RowLayout {
+        width: parent.width
+        spacing: Style.space(10)
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(3)
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: root.activeTrack ? root.activeTrack.title : "Tunarchy"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            elide: Text.ElideRight
+          }
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: root.activeTrack ? Model.subtitle(root.activeTrack)
+              : (root.plexConnected ? "Choose music from your library" : "Connect Plex to play music")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+
+        PanelActionButton {
+          id: miniHelpButton
+          Layout.alignment: Qt.AlignTop
+          size: Style.space(26)
+          iconText: "\uf013"
+          tooltipText: "Help and settings"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          focusable: true
+          Accessible.name: tooltipText
+          onClicked: {
+            root.helpVisible = true
+            Qt.callLater(helpButton.forceActiveFocus)
+          }
+        }
+      }
+
+      TextField {
+        id: miniSearchField
+        visible: root.plexConnected
+        width: parent.width
+        placeholderText: "Search Plex…"
+        Accessible.name: "Search Plex music"
+        foreground: root.foreground
+        font.family: root.fontFamily
+        text: root.query
+        maximumLength: 256
+        onTextChanged: {
+          if (root.miniActive && !root.suppressSearch) root.updateMiniSearch(text)
+        }
+        onAccepted: root.playMiniSelection()
+        Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_Down && root.items.length > 0) {
+            root.selectedIndex = 0
+            miniResults.forceActiveFocus()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Up && root.items.length > 0) {
+            root.selectedIndex = root.items.length - 1
+            miniResults.forceActiveFocus()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Escape) {
+            root.handleEscape()
+            event.accepted = true
+          }
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.query.trim() !== "" && (root.loading || root.miniSearchPending)
+        width: parent.width
+        text: "Searching…"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.query.trim() !== "" && !root.loading && !root.miniSearchPending && root.items.length === 0 && root.errorText === ""
+        width: parent.width
+        text: "No matches."
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      ListView {
+        id: miniResults
+        visible: root.query.trim() !== "" && root.items.length > 0
+        width: parent.width
+        height: visible ? Math.min(contentHeight, Style.space(216)) : 0
+        spacing: Style.space(3)
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        model: root.items
+        currentIndex: root.selectedIndex
+        activeFocusOnTab: true
+        Accessible.role: Accessible.List
+        Accessible.name: "Search results"
+        Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_Down) {
+            root.selectedIndex = Math.min(root.items.length - 1, root.selectedIndex + 1)
+            miniResults.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+            event.accepted = true
+          } else if (event.key === Qt.Key_Up) {
+            if (root.selectedIndex === 0) miniSearchField.forceActiveFocus()
+            else {
+              root.selectedIndex -= 1
+              miniResults.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+            }
+            event.accepted = true
+          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            root.playMiniSelection()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Escape) {
+            root.handleEscape()
+            event.accepted = true
+          }
+        }
+
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        delegate: CursorSurface {
+          id: miniResultRow
+          required property var modelData
+          required property int index
+          width: ListView.view.width
+          height: Style.space(38)
+          hasCursor: root.selectedIndex === index
+          foreground: root.foreground
+          Accessible.role: Accessible.ListItem
+          Accessible.name: (modelData.title || "Untitled") + ", " + Model.subtitle(modelData)
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onEntered: root.selectedIndex = miniResultRow.index
+            onClicked: {
+              root.selectedIndex = miniResultRow.index
+              root.playMiniSelection()
+            }
+          }
+
+          ColumnLayout {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            spacing: 0
+            Text {
+              textFormat: Text.PlainText
+              Layout.fillWidth: true
+              text: miniResultRow.modelData.title || "Untitled"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+            Text {
+              textFormat: Text.PlainText
+              Layout.fillWidth: true
+              text: Model.subtitle(miniResultRow.modelData)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+          }
+        }
+      }
+
+      RowLayout {
+        visible: !!root.activeTrack && root.plexConnected
+        width: parent.width
+        spacing: Style.space(7)
+        Text {
+          textFormat: Text.PlainText
+          text: Model.formatTime(root.player.position)
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+        PanelSlider {
+          id: miniSeekSlider
+          Layout.fillWidth: true
+          bar: root.bar
+          value: Number(root.player.position) || 0
+          maximum: Math.max(1, Number(root.player.duration) || 1)
+          step: 5
+          activeFocusOnTab: true
+          Accessible.role: Accessible.Slider
+          Accessible.name: "Playback position"
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Left || event.key === Qt.Key_Down) {
+              root.control("seek", Math.max(0, Number(root.player.position) - 5)); event.accepted = true
+            } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up) {
+              root.control("seek", Math.min(Number(root.player.duration) || 0, Number(root.player.position) + 5)); event.accepted = true
+            } else if (event.key === Qt.Key_Home) {
+              root.control("seek", 0); event.accepted = true
+            } else if (event.key === Qt.Key_End) {
+              root.control("seek", Number(root.player.duration) || 0); event.accepted = true
+            }
+          }
+          onReleased: function(next) { root.control("seek", next) }
+        }
+        Text {
+          textFormat: Text.PlainText
+          text: Model.formatTime(root.player.duration)
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+
+      RowLayout {
+        width: parent.width
+        spacing: Style.space(8)
+        PanelActionButton {
+          size: Style.space(30)
+          iconText: "\uf048"
+          tooltipText: "Previous"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          focusable: true
+          enabled: !!root.activeTrack
+          Accessible.name: tooltipText
+          onClicked: root.control("previous")
+        }
+        PanelActionButton {
+          id: miniPlayButton
+          size: Style.space(36)
+          iconText: root.player && root.player.playing ? "\uf04c" : "\uf04b"
+          tooltipText: root.player && root.player.playing ? "Pause" : "Play"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          bordered: true
+          focusable: true
+          enabled: root.plexConnected && (root.activeTrack !== null || Number(root.player.queueLength || 0) > 0)
+          Accessible.name: tooltipText
+          onClicked: root.control("toggle")
+        }
+        PanelActionButton {
+          size: Style.space(30)
+          iconText: "\uf051"
+          tooltipText: "Next"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          focusable: true
+          enabled: !!root.activeTrack
+          Accessible.name: tooltipText
+          onClicked: root.control("next")
+        }
+        Item { Layout.fillWidth: true }
+        PanelActionButton {
+          id: miniBrowseButton
+          size: Style.space(30)
+          iconText: "\uf03a"
+          tooltipText: "Open full library"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          focusable: true
+          Accessible.name: tooltipText
+          onClicked: root.showFullView()
+        }
+      }
+
+      RowLayout {
+        visible: root.plexConnected
+        width: parent.width
+        spacing: Style.space(8)
+        Text {
+          textFormat: Text.PlainText
+          text: "\uf028"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+        PanelSlider {
+          id: miniVolumeSlider
+          Layout.fillWidth: true
+          bar: root.bar
+          value: root.displayedVolume
+          minimum: 0
+          maximum: root.volumeMaximum
+          step: 5
+          integer: true
+          enabled: root.volumeAvailable
+          activeFocusOnTab: true
+          Accessible.role: Accessible.Slider
+          Accessible.name: root.volumeMode === "system" ? "System volume" : "Plex player volume"
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Left || event.key === Qt.Key_Down) {
+              root.setVolume(Math.max(0, root.displayedVolume - 5)); event.accepted = true
+            } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Up) {
+              root.setVolume(Math.min(root.volumeMaximum, root.displayedVolume + 5)); event.accepted = true
+            } else if (event.key === Qt.Key_Home) {
+              root.setVolume(0); event.accepted = true
+            } else if (event.key === Qt.Key_End) {
+              root.setVolume(root.volumeMaximum); event.accepted = true
+            }
+          }
+          onMoved: function(next) { root.setVolume(next) }
+        }
+        Text {
+          textFormat: Text.PlainText
+          text: root.volumeAvailable ? Math.round(miniVolumeSlider.dragging
+            ? miniVolumeSlider.liveValue : root.displayedVolume) + "%" : "N/A"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          Layout.preferredWidth: Style.space(35)
+          horizontalAlignment: Text.AlignRight
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.errorText !== ""
+        width: parent.width
+        text: root.errorText
+        color: Color.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+    }
 
     Column {
       id: contentColumn
+      visible: !root.miniActive
       width: parent.width
       spacing: Style.space(12)
 
@@ -1112,6 +1554,22 @@ Panel {
         }
 
         PanelActionButton {
+          visible: root.miniMode && root.fullViewTemporary && !root.helpVisible
+          Layout.alignment: Qt.AlignTop
+          size: Style.space(28)
+          iconText: "\uf066"
+          tooltipText: "Return to mini player"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          focusable: true
+          Accessible.name: tooltipText
+          onClicked: {
+            root.fullViewTemporary = false
+            Qt.callLater(miniBrowseButton.forceActiveFocus)
+          }
+        }
+
+        PanelActionButton {
           id: helpButton
           Layout.alignment: Qt.AlignTop
           size: Style.space(28)
@@ -1125,7 +1583,7 @@ Panel {
           Accessible.name: tooltipText
           onClicked: {
             root.helpVisible = !root.helpVisible
-            forceActiveFocus()
+            Qt.callLater(function() { (root.miniActive ? miniBrowseButton : helpButton).forceActiveFocus() })
           }
 
           Image {
@@ -1228,6 +1686,80 @@ Panel {
             text: root.volumeMode === "system"
               ? "The slider changes Omarchy's current audio output."
               : "The slider changes only Tunarchy's local mpv player."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Item { width: 1; height: Style.space(4) }
+
+          Text {
+            textFormat: Text.PlainText
+            width: helpColumn.width
+            text: "Player view"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+
+          Row {
+            width: helpColumn.width
+            height: Style.space(32)
+            spacing: Style.space(6)
+
+            Repeater {
+              model: [
+                { value: false, label: "Full" },
+                { value: true, label: "Mini" }
+              ]
+              delegate: BorderSurface {
+                required property var modelData
+                width: (helpColumn.width - Style.space(6)) / 2
+                height: Style.space(32)
+                radius: Style.cornerRadius
+                color: activeFocus ? Style.focusFillFor(root.foreground, Color.accent)
+                  : (root.miniMode === modelData.value
+                    ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+                borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent)
+                  : Border.controlSpec(root.miniMode === modelData.value ? "hover-cursor" : "normal", root.foreground, Color.accent)
+                activeFocusOnTab: true
+                enabled: !miniModeProc.running
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: modelData.label + " player view"
+                Accessible.checked: root.miniMode === modelData.value
+                Keys.onReturnPressed: root.selectPlayerView(modelData.value)
+                Keys.onEnterPressed: root.selectPlayerView(modelData.value)
+                Keys.onSpacePressed: root.selectPlayerView(modelData.value)
+
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.centerIn: parent
+                  text: parent.modelData.label
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: root.miniMode === parent.modelData.value
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: parent.enabled
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    parent.forceActiveFocus()
+                    root.selectPlayerView(parent.modelData.value)
+                  }
+                }
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: helpColumn.width
+            text: "Mini shows playback controls. Open the full library from its list button."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1437,7 +1969,7 @@ Panel {
         maximumLength: 256
         onTextChanged: {
           root.query = text
-          if (!root.suppressSearch) searchDebounce.restart()
+          if (!root.suppressSearch && !root.miniActive) searchDebounce.restart()
         }
         Keys.onPressed: function(event) {
           if (event.key === Qt.Key_Left && text === "") { root.switchNavigation(-1); event.accepted = true }

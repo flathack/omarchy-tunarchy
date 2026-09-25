@@ -22,7 +22,8 @@
       "recentAlbumCount": 20,
       "libraryItemCount": 100,
       "demoMode": false,
-      "volumeMode": "System"
+      "volumeMode": "System",
+      "miniMode": false
     },
     "schema": [
       {
@@ -59,6 +60,13 @@
         "options": ["System", "Plex"],
         "defaultValue": "System",
         "description": "Choose whether the player slider changes the Omarchy system output or Tunarchy's local mpv volume."
+      },
+      {
+        "key": "miniMode",
+        "type": "boolean",
+        "label": "Mini player",
+        "defaultValue": false,
+        "description": "Open a compact playback popup. The full library remains available from the mini player."
       }
     ]
   }

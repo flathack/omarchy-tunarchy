@@ -23,6 +23,9 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 - Actionable offline, authentication, DNS, library, and server error states
 - Lazy on-demand artwork loading, bounded private cache, and offline last-good data
 - Native Omarchy/Quickshell styling with top, bottom, and vertical bar support
+- Optional mini player popup with search, playback controls, progress, and volume
+- Mini mode shows only a music icon in the bar
+- The full player opens on Queue when music is playing
 - Live Omarchy theme and font matching: the bar label uses bar colors, while
   the player panel uses popup text, accent, and error colors from the active theme
 - Keyboard and mouse navigation
@@ -92,6 +95,10 @@ the player panel is open. Use `omarchy theme set <name>` or `omarchy font set
 customize popup text through `popups.text` in Omarchy's `shell.toml`.
 
 - Left-click the bar item to open the player.
+- Switch between **Full** and **Mini** under **Help and settings → Player view**.
+  Mini keeps the full library one click away through its list button. Search
+  results appear as you type; select one with the arrow keys and press Enter
+  to play it immediately.
 - Right-click it to reconfigure the Plex connection.
 - Middle-click it to play or pause.
 - Scroll over it to move to the previous or next track.

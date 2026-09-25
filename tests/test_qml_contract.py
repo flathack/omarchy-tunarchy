@@ -82,6 +82,9 @@ class QmlContractTests(unittest.TestCase):
     def test_opening_during_playback_defaults_to_the_queue(self):
         self.assertIn("loadView(Model.defaultView(player))", QML)
         self.assertIn("function defaultView(status)", MODEL)
+        self.assertIn("pendingOpenView = true", QML)
+        self.assertIn("var openingView = Model.defaultView(parsed)", QML)
+        self.assertIn('loadView(Model.defaultView(parsed))', QML)
 
     def test_arrow_keys_switch_library_tabs(self):
         self.assertIn('sequence: "Left"', QML)
@@ -195,6 +198,23 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("color: button.foreground", QML)
         self.assertIn("foreground: root.player && root.player.shuffle ? Color.accent : root.foreground", QML)
         self.assertIn('foreground: root.player && root.player.repeat !== "off" ? Color.accent : root.foreground', QML)
+
+    def test_mini_player_is_optional_and_keeps_full_library_available(self):
+        self.assertIn('setting("miniMode", false) === true', QML)
+        self.assertIn('id: miniContent', QML)
+        self.assertIn('id: miniPlayButton', QML)
+        self.assertIn('id: miniVolumeSlider', QML)
+        self.assertIn('id: miniSearchField', QML)
+        self.assertIn('onTextChanged: {\n          if (root.miniActive && !root.suppressSearch) root.updateMiniSearch(text)', QML)
+        self.assertIn('id: miniResults', QML)
+        self.assertIn('onAccepted: root.playMiniSelection()', QML)
+        self.assertNotIn('id: miniCover', QML)
+        self.assertIn('visible: root.miniMode\n      text: "\\uf001"', QML)
+        self.assertIn('visible: !root.miniMode', QML)
+        self.assertIn('onClicked: root.showFullView()', QML)
+        self.assertIn('model: [\n                { value: false, label: "Full" },\n                { value: true, label: "Mini" }', QML)
+        self.assertIn('["omarchy", "bar", "set", moduleName, "miniMode", mini ? "true" : "false", "--json"]', QML)
+        self.assertIn('if (plexConnected && !miniMode) {\n      loadView(Model.defaultView(player))', QML)
 
     def test_connection_toggle_preserves_setup_and_gates_plex_ui(self):
         self.assertIn("readonly property bool plexConnected", QML)
