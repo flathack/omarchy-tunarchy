@@ -934,6 +934,7 @@ Panel {
     }
 
     Text {
+      id: miniBarIcon
       textFormat: Text.PlainText
       anchors.centerIn: parent
       visible: root.miniMode
@@ -942,6 +943,28 @@ Panel {
       font.family: root.fontFamily
       font.pixelSize: Style.font.icon
       Accessible.name: "Music"
+    }
+
+    SequentialAnimation {
+      running: root.miniMode && root.player && root.player.playing === true
+      loops: Animation.Infinite
+      onStopped: miniBarIcon.scale = 1
+      NumberAnimation {
+        target: miniBarIcon
+        property: "scale"
+        from: 1
+        to: 1.12
+        duration: 520
+        easing.type: Easing.InOutSine
+      }
+      NumberAnimation {
+        target: miniBarIcon
+        property: "scale"
+        from: 1.12
+        to: 1
+        duration: 520
+        easing.type: Easing.InOutSine
+      }
     }
 
     Row {

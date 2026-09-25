@@ -24,7 +24,7 @@ player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 - Lazy on-demand artwork loading, bounded private cache, and offline last-good data
 - Native Omarchy/Quickshell styling with top, bottom, and vertical bar support
 - Optional mini player popup with search, playback controls, progress, and volume
-- Mini mode shows only a music icon in the bar
+- Mini mode shows only a music icon in the bar, with a subtle pulse during playback
 - The full player opens on Queue when music is playing
 - Live Omarchy theme and font matching: the bar label uses bar colors, while
   the player panel uses popup text, accent, and error colors from the active theme

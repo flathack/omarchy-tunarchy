@@ -212,6 +212,8 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('onAccepted: root.playMiniSelection()', QML)
         self.assertNotIn('id: miniCover', QML)
         self.assertIn('visible: root.miniMode\n      text: "\\uf001"', QML)
+        self.assertIn('running: root.miniMode && root.player && root.player.playing === true', QML)
+        self.assertIn('onStopped: miniBarIcon.scale = 1', QML)
         self.assertIn('visible: !root.miniMode', QML)
         self.assertIn('onClicked: root.showFullView()', QML)
         self.assertIn('model: [\n                { value: false, label: "Full" },\n                { value: true, label: "Mini" }', QML)
