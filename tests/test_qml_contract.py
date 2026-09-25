@@ -82,7 +82,8 @@ class QmlContractTests(unittest.TestCase):
     def test_opening_during_playback_defaults_to_the_queue(self):
         self.assertIn("loadView(Model.defaultView(player))", QML)
         self.assertIn("function defaultView(status)", MODEL)
-        self.assertIn("pendingOpenView = true", QML)
+        self.assertIn("pendingOpenViewNeedsRetry = statusProc.running", QML)
+        self.assertIn("Qt.callLater(root.refreshStatus)", QML)
         self.assertIn("var openingView = Model.defaultView(parsed)", QML)
         self.assertIn('loadView(Model.defaultView(parsed))', QML)
 
@@ -182,7 +183,7 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("message.length > 400", QML)
 
     def test_active_artwork_uses_async_frontend_pipeline(self):
-        self.assertIn("if (parsed.track && (parsed.connected !== false || demoMode)) requestArtwork(parsed.track.artSource)", QML)
+        self.assertIn("if (parsed.track && (parsed.connected !== false || demoMode) && !miniActive) requestArtwork(parsed.track.artSource)", QML)
         self.assertIn("plexConnected && activeTrack ? artworkThumb(activeTrack)", QML)
         self.assertIn("source: root.activeThumb", QML)
 
@@ -206,6 +207,7 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('id: miniVolumeSlider', QML)
         self.assertIn('id: miniSearchField', QML)
         self.assertIn('onTextChanged: {\n          if (root.miniActive && !root.suppressSearch) root.updateMiniSearch(text)', QML)
+        self.assertIn('function updateMiniSearch(value) {\n    query = value\n    view = "search"\n    items = []\n    selectedIndex = 0\n    searchDebounce.stop()\n    nextDataRequestId += 1', QML)
         self.assertIn('id: miniResults', QML)
         self.assertIn('onAccepted: root.playMiniSelection()', QML)
         self.assertNotIn('id: miniCover', QML)
@@ -215,6 +217,11 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn('model: [\n                { value: false, label: "Full" },\n                { value: true, label: "Mini" }', QML)
         self.assertIn('["omarchy", "bar", "set", moduleName, "miniMode", mini ? "true" : "false", "--json"]', QML)
         self.assertIn('if (plexConnected && !miniMode) {\n      loadView(Model.defaultView(player))', QML)
+        self.assertIn('function requestArtwork(source) {\n    if (miniActive) return', QML)
+        self.assertIn('if (!opened || !plexConnected || miniActive) return', QML)
+
+    def test_popup_follows_its_bar_icon(self):
+        self.assertIn('anchorItem: button\n    owner: root\n    bar: root.bar\n    open: root.opened\n    centerOnBar: false', QML)
 
     def test_connection_toggle_preserves_setup_and_gates_plex_ui(self):
         self.assertIn("readonly property bool plexConnected", QML)

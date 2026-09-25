@@ -49,6 +49,7 @@ Panel {
   property var miniModeOverride: null
   property bool fullViewTemporary: false
   property bool pendingOpenView: false
+  property bool pendingOpenViewNeedsRetry: false
   property bool disconnecting: false
 
   readonly property var navigation: [
@@ -153,13 +154,19 @@ Panel {
     fullViewTemporary = true
     if (plexConnected) {
       loadView(Model.defaultView(player))
-      pendingOpenView = true
-      refreshStatus()
+      requestOpeningStatus()
     }
     Qt.callLater(function() {
+      root.requestVisibleArtwork()
       if (root.plexConnected) (root.view === "queue" ? itemList : searchField).forceActiveFocus()
       else connectButton.forceActiveFocus()
     })
+  }
+
+  function requestOpeningStatus() {
+    pendingOpenView = true
+    pendingOpenViewNeedsRetry = statusProc.running
+    refreshStatus()
   }
 
   function updateMiniSearch(value) {
@@ -168,19 +175,19 @@ Panel {
     items = []
     selectedIndex = 0
     searchDebounce.stop()
+    nextDataRequestId += 1
+    requestedDataRequestId = nextDataRequestId
+    queuedDataRequestId = 0
+    queuedDataMode = ""
+    queuedDataCommand = []
+    if (dataProc.running) dataProc.running = false
+    loading = false
+    errorText = ""
     if (value.trim() !== "") {
       miniSearchPending = true
       searchDebounce.restart()
     } else {
       miniSearchPending = false
-      nextDataRequestId += 1
-      requestedDataRequestId = nextDataRequestId
-      queuedDataRequestId = 0
-      queuedDataMode = ""
-      queuedDataCommand = []
-      if (dataProc.running) dataProc.running = false
-      loading = false
-      errorText = ""
     }
   }
 
@@ -202,12 +209,12 @@ Panel {
     helpVisible = false
     fullViewTemporary = false
     controller.show()
-    refreshStatus()
     refreshHealth()
     if (plexConnected && !miniMode) {
       loadView(Model.defaultView(player))
-      pendingOpenView = true
+      requestOpeningStatus()
     }
+    else refreshStatus()
     Qt.callLater(function() {
       if (root.miniActive) (root.plexConnected ? miniSearchField : miniHelpButton).forceActiveFocus()
       else (root.plexConnected ? (root.view === "queue" ? itemList : searchField) : connectButton).forceActiveFocus()
@@ -217,6 +224,7 @@ Panel {
   function close() {
     controller.hide()
     pendingOpenView = false
+    pendingOpenViewNeedsRetry = false
     query = ""
     errorText = ""
     helpVisible = false
@@ -264,13 +272,20 @@ Panel {
     if (parsed) {
       var wasConnected = plexConnected
       player = parsed
-      if (parsed.track && (parsed.connected !== false || demoMode)) requestArtwork(parsed.track.artSource)
-      if (pendingOpenView && opened && !miniActive && plexConnected) {
-        pendingOpenView = false
-        var openingView = Model.defaultView(parsed)
-        if (view !== openingView) loadView(openingView)
+      if (parsed.track && (parsed.connected !== false || demoMode) && !miniActive) requestArtwork(parsed.track.artSource)
+      if (pendingOpenView && opened && !miniActive) {
+        if (pendingOpenViewNeedsRetry) {
+          pendingOpenViewNeedsRetry = false
+          Qt.callLater(root.refreshStatus)
+        } else {
+          pendingOpenView = false
+          if (plexConnected) {
+            var openingView = Model.defaultView(parsed)
+            if (view !== openingView) loadView(openingView)
+          }
+        }
       }
-      if (opened && !wasConnected && (parsed.connected !== false || demoMode) && items.length === 0 && !loading)
+      if (opened && !pendingOpenView && !wasConnected && (parsed.connected !== false || demoMode) && items.length === 0 && !loading)
         loadView(Model.defaultView(parsed))
     }
   }
@@ -351,6 +366,7 @@ Panel {
 
   function loadView(nextView) {
     pendingOpenView = false
+    pendingOpenViewNeedsRetry = false
     suppressSearch = true
     query = ""
     searchDebounce.stop()
@@ -541,6 +557,7 @@ Panel {
   }
 
   function requestArtwork(source) {
+    if (miniActive) return
     var value = String(source || "")
     if (value === "" || value.indexOf("/") !== 0 || value.indexOf("//") === 0) return
     if (resolvedArtwork[value]) return
@@ -577,7 +594,7 @@ Panel {
   }
 
   function requestVisibleArtwork() {
-    if (!opened || !plexConnected) return
+    if (!opened || !plexConnected || miniActive) return
     if (activeTrack) requestArtwork(activeTrack.artSource)
     // Revisit visible rows after a full queue drains. Delegates that stayed
     // on screen do not run Component.onCompleted again.
@@ -994,7 +1011,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    centerOnBar: true
+    centerOnBar: false
     focusTarget: root.miniActive ? (root.plexConnected ? miniSearchField : miniHelpButton) : root.helpVisible ? helpButton : root.plexConnected
       ? (root.view === "queue" ? itemList : searchField) : (root.configured ? connectionButton : connectButton)
     contentWidth: fittedContentWidth(Style.space(root.miniActive ? 330 : 540))
