@@ -4,7 +4,7 @@ An unofficial native Omarchy bar widget for browsing and playing music from a
 Plex Media Server. Click the bar item to open a compact library browser and
 player. Tunarchy is not affiliated with or endorsed by Plex, Inc.
 
-![Tunarchy player preview](preview.png)
+![Tunarchy full and mini player preview](preview-modes.png)
 
 ## Features
 
