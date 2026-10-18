@@ -55,7 +55,8 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("visible: !root.activeTrack && !barCover.visible", QML)
         self.assertIn("visible: !root.helpVisible && !!root.activeTrack && !headerCover.visible", QML)
         self.assertIn("visible: rowCover.status !== Image.Ready", QML)
-        self.assertIn("property color foreground: Color.accent", PLACEHOLDER)
+        self.assertIn("import qs.Commons as Commons", PLACEHOLDER)
+        self.assertIn("property color foreground: Commons.Color.accent", PLACEHOLDER)
         self.assertIn("fixedHeight: vertical ? Style.bar.iconSlot", QML)
 
     def test_tuna_assets_scale_across_player_ui(self):
@@ -194,11 +195,14 @@ class QmlContractTests(unittest.TestCase):
             self.assertIn("textFormat: Text.PlainText", block)
 
     def test_omarchy_theme_roles_update_the_popup(self):
-        self.assertIn("readonly property color foreground: Color.popups.text", QML)
+        self.assertIn("import qs.Commons as Commons", QML)
+        self.assertIn("readonly property color foreground: Commons.Color.popups.text", QML)
         self.assertIn("readonly property string fontFamily: Style.font.family", QML)
         self.assertIn("color: button.foreground", QML)
-        self.assertIn("foreground: root.player && root.player.shuffle ? Color.accent : root.foreground", QML)
-        self.assertIn('foreground: root.player && root.player.repeat !== "off" ? Color.accent : root.foreground', QML)
+        self.assertIn("foreground: root.player && root.player.shuffle ? Commons.Color.accent : root.foreground", QML)
+        self.assertIn('foreground: root.player && root.player.repeat !== "off" ? Commons.Color.accent : root.foreground', QML)
+        self.assertNotRegex(QML, r"(?<!Commons\.)Color\.")
+        self.assertNotRegex(PLACEHOLDER, r"(?<!Commons\.)Color\.")
 
     def test_mini_player_is_optional_and_keeps_full_library_available(self):
         self.assertIn('setting("miniMode", false) === true', QML)

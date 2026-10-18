@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -85,7 +86,7 @@ Panel {
   // The bar and its popup can use different text colors in shell.toml.
   // Color and Style are live Omarchy singletons, so theme and font changes
   // update the open panel without a plugin restart.
-  readonly property color foreground: Color.popups.text
+  readonly property color foreground: Commons.Color.popups.text
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: Style.font.family
   readonly property var activeTrack: player && player.track ? player.track : null
@@ -981,7 +982,7 @@ Panel {
         height: width
         anchors.verticalCenter: parent.verticalCenter
         radius: Math.max(2, Style.cornerRadius / 2)
-        color: Style.selectedFillFor(button.foreground, Color.accent)
+        color: Style.selectedFillFor(button.foreground, Commons.Color.accent)
         clip: true
         opacity: root.player && root.player.playing ? 1 : 0.78
 
@@ -1377,7 +1378,7 @@ Panel {
         visible: root.errorText !== ""
         width: parent.width
         text: root.errorText
-        color: Color.urgent
+        color: Commons.Color.urgent
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
@@ -1398,7 +1399,7 @@ Panel {
           Layout.preferredWidth: Style.space(82)
           Layout.preferredHeight: Style.space(82)
           radius: Style.cornerRadius
-          color: Style.selectedFillFor(root.foreground, Color.accent)
+          color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
           clip: true
 
           Image {
@@ -1414,7 +1415,7 @@ Panel {
 
           CoverPlaceholder {
             anchors.fill: parent
-            foreground: Color.accent
+            foreground: Commons.Color.accent
             visible: !root.helpVisible && !!root.activeTrack && !headerCover.visible
           }
 
@@ -1476,8 +1477,8 @@ Panel {
               Layout.fillWidth: true
               Layout.preferredHeight: seekSlider.implicitHeight + Style.space(4)
               radius: Style.cornerRadius
-              color: activeFocus ? Style.focusFillFor(root.foreground, Color.accent) : "transparent"
-              borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent) : Border.none()
+              color: activeFocus ? Style.focusFillFor(root.foreground, Commons.Color.accent) : "transparent"
+              borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Commons.Color.accent) : Border.none()
               activeFocusOnTab: true
               Accessible.role: Accessible.Slider
               Accessible.name: "Playback position"
@@ -1530,8 +1531,8 @@ Panel {
               Layout.fillWidth: true
               Layout.preferredHeight: volumeSlider.implicitHeight + Style.space(4)
               radius: Style.cornerRadius
-              color: activeFocus ? Style.focusFillFor(root.foreground, Color.accent) : "transparent"
-              borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent) : Border.none()
+              color: activeFocus ? Style.focusFillFor(root.foreground, Commons.Color.accent) : "transparent"
+              borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Commons.Color.accent) : Border.none()
               activeFocusOnTab: true
               enabled: root.volumeAvailable
               Accessible.role: Accessible.Slider
@@ -1581,7 +1582,7 @@ Panel {
           size: Style.space(28)
           iconText: "\uf011"
           tooltipText: root.plexConnected ? "Disconnect from Plex" : "Connect to Plex"
-          foreground: root.plexConnected ? root.foreground : Color.urgent
+          foreground: root.plexConnected ? root.foreground : Commons.Color.urgent
           fontFamily: root.fontFamily
           fontSize: Style.font.body
           bordered: true
@@ -1644,8 +1645,8 @@ Panel {
         width: parent.width
         implicitHeight: helpColumn.implicitHeight + Style.space(20)
         radius: Style.cornerRadius
-        color: Style.selectedFillFor(root.foreground, Color.accent)
-        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+        color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
 
         Column {
           id: helpColumn
@@ -1682,12 +1683,12 @@ Panel {
                 height: Style.space(32)
                 radius: Style.cornerRadius
                 color: activeFocus
-                  ? Style.focusFillFor(root.foreground, Color.accent)
+                  ? Style.focusFillFor(root.foreground, Commons.Color.accent)
                   : (root.volumeMode === modelData.value
-                    ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
+                    ? Style.selectedFillFor(root.foreground, Commons.Color.accent) : "transparent")
                 borderSpec: activeFocus
-                  ? Border.controlSpec("focus", root.foreground, Color.accent)
-                  : Border.controlSpec(root.volumeMode === modelData.value ? "hover-cursor" : "normal", root.foreground, Color.accent)
+                  ? Border.controlSpec("focus", root.foreground, Commons.Color.accent)
+                  : Border.controlSpec(root.volumeMode === modelData.value ? "hover-cursor" : "normal", root.foreground, Commons.Color.accent)
                 activeFocusOnTab: true
                 enabled: !volumeModeProc.running
                 Accessible.role: Accessible.RadioButton
@@ -1759,11 +1760,11 @@ Panel {
                 width: (helpColumn.width - Style.space(6)) / 2
                 height: Style.space(32)
                 radius: Style.cornerRadius
-                color: activeFocus ? Style.focusFillFor(root.foreground, Color.accent)
+                color: activeFocus ? Style.focusFillFor(root.foreground, Commons.Color.accent)
                   : (root.miniMode === modelData.value
-                    ? Style.selectedFillFor(root.foreground, Color.accent) : "transparent")
-                borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Color.accent)
-                  : Border.controlSpec(root.miniMode === modelData.value ? "hover-cursor" : "normal", root.foreground, Color.accent)
+                    ? Style.selectedFillFor(root.foreground, Commons.Color.accent) : "transparent")
+                borderSpec: activeFocus ? Border.controlSpec("focus", root.foreground, Commons.Color.accent)
+                  : Border.controlSpec(root.miniMode === modelData.value ? "hover-cursor" : "normal", root.foreground, Commons.Color.accent)
                 activeFocusOnTab: true
                 enabled: !miniModeProc.running
                 Accessible.role: Accessible.RadioButton
@@ -1820,7 +1821,7 @@ Panel {
                 Layout.preferredHeight: Style.space(22)
                 radius: Style.cornerRadius / 2
                 color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
-                borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
 
                 Text {
                   textFormat: Text.PlainText
@@ -1858,7 +1859,7 @@ Panel {
           spacing: Style.space(10)
           PanelActionButton {
             iconText: "\uf074"; tooltipText: root.player && root.player.shuffle ? "Shuffle on" : "Shuffle off"
-            foreground: root.player && root.player.shuffle ? Color.accent : root.foreground
+            foreground: root.player && root.player.shuffle ? Commons.Color.accent : root.foreground
             fontFamily: root.fontFamily; bordered: root.player && root.player.shuffle === true; focusable: true
             Accessible.name: tooltipText
             onClicked: root.control("shuffle")
@@ -1885,7 +1886,7 @@ Panel {
           PanelActionButton {
             iconText: root.player && root.player.repeat === "one" ? "\uf366" : "\uf363"
             tooltipText: root.player && root.player.repeat === "one" ? "Repeat one" : (root.player && root.player.repeat === "all" ? "Repeat all" : "Repeat off")
-            foreground: root.player && root.player.repeat !== "off" ? Color.accent : root.foreground
+            foreground: root.player && root.player.repeat !== "off" ? Commons.Color.accent : root.foreground
             fontFamily: root.fontFamily; bordered: root.player && root.player.repeat !== "off"; focusable: true
             Accessible.name: tooltipText
             onClicked: root.control("repeat")
@@ -1911,7 +1912,7 @@ Panel {
         visible: !root.helpVisible && !root.health.ok && root.health.code !== "unconfigured" && !root.demoMode
         width: parent.width
         height: healthRow.implicitHeight + Style.space(14)
-        foreground: Color.urgent
+        foreground: Commons.Color.urgent
 
         RowLayout {
           id: healthRow
@@ -1921,7 +1922,7 @@ Panel {
           anchors.leftMargin: Style.space(8)
           anchors.rightMargin: Style.space(8)
           spacing: Style.space(8)
-          Text { textFormat: Text.PlainText; text: "\uf071"; color: Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.icon }
+          Text { textFormat: Text.PlainText; text: "\uf071"; color: Commons.Color.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.icon }
           Text {
             textFormat: Text.PlainText
             Layout.fillWidth: true
@@ -2078,7 +2079,7 @@ Panel {
         visible: !root.helpVisible && root.errorText !== ""
         width: parent.width
         text: root.errorText
-        color: Color.urgent
+        color: Commons.Color.urgent
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
         wrapMode: Text.WordWrap
@@ -2145,7 +2146,7 @@ Panel {
               Layout.preferredWidth: Style.space(38)
               Layout.preferredHeight: Style.space(38)
               radius: Style.cornerRadius / 2
-              color: Style.selectedFillFor(root.foreground, Color.accent)
+              color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
               clip: true
               Image {
                 id: rowCover
@@ -2158,7 +2159,7 @@ Panel {
               }
               CoverPlaceholder {
                 anchors.fill: parent
-                foreground: Color.accent
+                foreground: Commons.Color.accent
                 visible: rowCover.status !== Image.Ready
               }
             }
@@ -2221,7 +2222,7 @@ Panel {
                 textFormat: Text.PlainText
                 visible: mediaRow.modelData.current === true
                 text: root.player && root.player.playing ? "\uf04c" : "\uf04b"
-                color: Color.urgent
+                color: Commons.Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 anchors.verticalCenter: parent.verticalCenter

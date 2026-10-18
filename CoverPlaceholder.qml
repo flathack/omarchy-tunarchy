@@ -1,10 +1,11 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A small record glyph that stays legible from the bar slot to the player hero.
 Item {
   id: root
-  property color foreground: Color.accent
+  property color foreground: Commons.Color.accent
   readonly property real discSize: Math.max(1, Math.min(width, height) * 0.66)
 
   Rectangle {
